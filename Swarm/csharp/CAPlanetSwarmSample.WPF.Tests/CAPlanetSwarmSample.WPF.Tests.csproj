@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Services\SolutionJsonExportService.cs" Link="Production\SolutionJsonExportService.cs" />
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Services\PltExportService.cs" Link="Production\PltExportService.cs" />
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Services\InitialPreviewFlow.cs" Link="Production\InitialPreviewFlow.cs" />
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Data\SwarmInput.cs" Link="Production\SwarmInput.cs" />
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Data\SwarmInputSummary.cs" Link="Production\SwarmInputSummary.cs" />
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Data\StructureReportSummary.cs" Link="Production\StructureReportSummary.cs" />
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Data\StructureReportExportResult.cs" Link="Production\StructureReportExportResult.cs" />
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Data\HintedLayoutMetrics.cs" Link="Production\HintedLayoutMetrics.cs" />
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Services\HintedLayoutAnalyzer.cs" Link="Production\HintedLayoutAnalyzer.cs" />
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Services\SwarmInputInspector.cs" Link="Production\SwarmInputInspector.cs" />
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Services\StructureReportInspector.cs" Link="Production\StructureReportInspector.cs" />
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Services\StructureReportExportService.cs" Link="Production\StructureReportExportService.cs" />
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Services\ConfigPresetService.cs" Link="Production\ConfigPresetService.cs" />
+    <Compile Include="..\CAPlanetSwarmSample.WPF\Services\MultiSeedCompetition.cs" Link="Production\MultiSeedCompetition.cs" />
+    <Compile Include="..\Natives\SwarmNative.cs" Link="Production\SwarmNative.cs" />
+    <Compile Include="..\Natives\SwarmOptimizer.cs" Link="Production\SwarmOptimizer.cs" />
+  </ItemGroup>
+
+</Project>

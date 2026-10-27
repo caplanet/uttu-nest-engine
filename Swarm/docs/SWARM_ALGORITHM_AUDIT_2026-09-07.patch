@@ -1,0 +1,4006 @@
+diff --git a/swarm-core/src/initial/raster.rs b/swarm-core/src/initial/raster.rs
+--- a/swarm-core/src/initial/raster.rs
++++ b/swarm-core/src/initial/raster.rs
+@@ -44,10 +44,11 @@
+     cell: f32,
+     w: usize,
+     out: &mut Vec<(usize, usize)>,
++    xs: &mut Vec<f32>,
+ ) {
+     out.clear();
+     let n = verts.len();
+-    let mut xs: Vec<f32> = Vec::with_capacity(8);
++    xs.clear();
+     for i in 0..n {
+         let (x0, y0) = (verts[i].0 + tx, verts[i].1 + ty);
+         let (x1, y1) = (verts[(i + 1) % n].0 + tx, verts[(i + 1) % n].1 + ty);
+@@ -74,8 +75,38 @@
+ 
+ impl OccRaster {
+     pub fn new(strip_w: f32, strip_h: f32, cell: f32) -> Self {
+-        let w = (strip_w / cell).ceil().max(1.0) as usize;
+-        let h = (strip_h / cell).ceil().max(1.0) as usize;
++        assert!(
++            strip_w.is_finite()
++                && strip_w >= 0.0
++                && strip_h.is_finite()
++                && strip_h >= 0.0
++                && cell.is_finite()
++                && cell > 0.0,
++            "raster dimensions must be finite and nonnegative, with positive cell size"
++        );
++        // This is an approximate ranking grid; exact CDE still decides placement.
++        // Bound its memory even for extreme aspect ratios or tiny requested cells.
++        const MAX_CELLS: usize = 1_048_576;
++        let dimensions = |cell: f32| {
++            (
++                (strip_w as f64 / cell as f64).ceil().max(1.0) as usize,
++                (strip_h as f64 / cell as f64).ceil().max(1.0) as usize,
++            )
++        };
++        let mut cell = cell;
++        let (mut w, mut h) = dimensions(cell);
++        if w.checked_mul(h).is_none_or(|n| n > MAX_CELLS) {
++            let budget = MAX_CELLS as f64;
++            cell = (cell as f64)
++                .max((strip_w as f64 * strip_h as f64 / budget).sqrt())
++                .max(strip_w as f64 / budget)
++                .max(strip_h as f64 / budget) as f32;
++            (w, h) = dimensions(cell);
++            while w.checked_mul(h).is_none_or(|n| n > MAX_CELLS) {
++                cell = (cell * 1.01).min(f32::MAX);
++                (w, h) = dimensions(cell);
++            }
++        }
+         OccRaster {
+             cell,
+             w,
+@@ -95,7 +126,9 @@
+ 
+     fn row_range(&self, poly: &SPolygon, ty: f32) -> (usize, usize) {
+         let r0 = (((poly.bbox.y_min + ty) / self.cell) - 0.5).ceil().max(0.0) as usize;
+-        let r1 = (((poly.bbox.y_max + ty) / self.cell) - 0.5).floor().max(0.0) as usize;
++        let r1 = (((poly.bbox.y_max + ty) / self.cell) - 0.5)
++            .floor()
++            .max(0.0) as usize;
+         let last = self.h.saturating_sub(1);
+         (r0.min(last), r1.min(last))
+     }
+@@ -104,13 +137,21 @@
+     pub fn mark(&mut self, poly: &SPolygon, tx: f32, ty: f32) {
+         let (r0, r1) = self.row_range(poly, ty);
+         let mut spans = Vec::with_capacity(4);
++        let mut xs = Vec::with_capacity(8);
+         for r in r0..=r1 {
+             let yc = (r as f32 + 0.5) * self.cell;
+-            row_spans(&poly.vertices, tx, ty, yc, self.cell, self.w, &mut spans);
++            row_spans(
++                &poly.vertices,
++                tx,
++                ty,
++                yc,
++                self.cell,
++                self.w,
++                &mut spans,
++                &mut xs,
++            );
+             for &(a, b) in &spans {
+-                for x in a..=b {
+-                    self.occ[r * self.w + x] = true;
+-                }
++                self.occ[r * self.w + a..=r * self.w + b].fill(true);
+             }
+         }
+     }
+@@ -119,16 +160,28 @@
+     pub fn fit(&self, poly: &SPolygon, tx: f32, ty: f32, cap: usize) -> Fit {
+         let (r0, r1) = self.row_range(poly, ty);
+         let c0 = (((poly.bbox.x_min + tx) / self.cell) - 0.5).ceil().max(0.0) as usize;
+-        let c1 = ((((poly.bbox.x_max + tx) / self.cell) - 0.5).floor().max(0.0) as usize)
++        let c1 = ((((poly.bbox.x_max + tx) / self.cell) - 0.5)
++            .floor()
++            .max(0.0) as usize)
+             .min(self.w.saturating_sub(1));
+         let ncols = c1.saturating_sub(c0) + 1;
+         let mut col_bottom: Vec<Option<usize>> = vec![None; ncols];
+         let mut fit = Fit::default();
+         let mut spans = Vec::with_capacity(4);
++        let mut xs = Vec::with_capacity(8);
+         let mut covered_row: Vec<bool> = vec![false; ncols];
+         for r in r0..=r1 {
+             let yc = (r as f32 + 0.5) * self.cell;
+-            row_spans(&poly.vertices, tx, ty, yc, self.cell, self.w, &mut spans);
++            row_spans(
++                &poly.vertices,
++                tx,
++                ty,
++                yc,
++                self.cell,
++                self.w,
++                &mut spans,
++                &mut xs,
++            );
+             covered_row.iter_mut().for_each(|c| *c = false);
+             let mut leftmost: Option<usize> = None;
+             for &(a, b) in &spans {
+@@ -186,7 +239,58 @@
+     use super::*;
+ 
+     fn rect(w: f32, h: f32) -> SPolygon {
+-        SPolygon::new(vec![Point(0.0, 0.0), Point(w, 0.0), Point(w, h), Point(0.0, h)]).unwrap()
++        SPolygon::new(vec![
++            Point(0.0, 0.0),
++            Point(w, 0.0),
++            Point(w, h),
++            Point(0.0, h),
++        ])
++        .unwrap()
++    }
++
++    #[test]
++    fn extreme_dimensions_have_bounded_memory() {
++        for (w, h, cell) in [
++            (f32::MAX, f32::MAX, f32::MIN_POSITIVE),
++            (f32::MAX, 1.0, 0.01),
++            (1.0, f32::MAX, 0.01),
++            (100.0, 100.0, 1.0e-20),
++        ] {
++            let r = OccRaster::new(w, h, cell);
++            assert!(r.occ.len() <= 1_048_576);
++            assert!(r.cell.is_finite() && r.cell >= cell);
++            assert!(r.w > 0 && r.h > 0);
++        }
++        let r = OccRaster::new(100.0, 200.0, 0.5);
++        assert_eq!((r.cell, r.w, r.h), (0.5, 200, 400));
++    }
++
++    #[test]
++    fn scanlines_match_independent_cell_center_oracle() {
++        let polygon = SPolygon::new(vec![
++            Point(0.0, 0.0),
++            Point(8.0, 0.0),
++            Point(8.0, 3.0),
++            Point(3.0, 3.0),
++            Point(3.0, 8.0),
++            Point(0.0, 8.0),
++        ])
++        .unwrap();
++        for step in 0..32 {
++            let tx = step as f32 * 0.13 - 2.0;
++            let ty = step as f32 * 0.17 - 2.0;
++            let mut r = OccRaster::new(20.0, 20.0, 0.5);
++            r.mark(&polygon, tx, ty);
++            for y in 0..r.h {
++                for x in 0..r.w {
++                    let px = (x as f32 + 0.5) * r.cell - tx;
++                    let py = (y as f32 + 0.5) * r.cell - ty;
++                    let inside =
++                        px >= 0.0 && px <= 8.0 && py >= 0.0 && py < 8.0 && (px <= 3.0 || py < 3.0);
++                    assert_eq!(r.at(x, y), inside, "step={step}, cell=({x},{y})");
++                }
++            }
++        }
+     }
+ 
+     #[test]
+diff --git a/swarm-core/src/lp_solver/clarabel_backend.rs b/swarm-core/src/lp_solver/clarabel_backend.rs
+--- a/swarm-core/src/lp_solver/clarabel_backend.rs
++++ b/swarm-core/src/lp_solver/clarabel_backend.rs
+@@ -25,10 +25,8 @@
+ //! 행 배열을 두 번 훑어야 한다. 두 개의 비음 행으로 넣어도 내점법이 같은 해를 내고
+ //! 코드가 한 겹 얇아지므로 **모든 행을 하나의 `NonnegativeConeT` 로 통일**했다.
+ //!
+-//! **무한대 경계는 행을 만들지 않는다.** clarabel 은 내부적으로 `1e20` 이상을
+-//! 무한으로 취급하는데([`clarabel::_INFINITY_DEFAULT`] 와 같은 값), 그런 행을 넣으면
+-//! 아무것도 제약하지 않으면서 KKT 행렬만 키운다. 그래서 `is_finite()` 뿐 아니라
+-//! 크기가 [`INFINITY_THRESHOLD`] 이상인 경계도 "없는 것"으로 본다.
++//! Only actual infinities mean absent bounds. Finite bounds outside Clarabel's
++//! representable range are rejected; silently dropping them changes the LP.
+ //!
+ //! # 희소행렬은 열 우선이다
+ //!
+@@ -266,6 +264,17 @@
+             return LpSolution::failed(NAME);
+         }
+ 
++        if problem
++            .lower
++            .iter()
++            .chain(&problem.upper)
++            .chain(problem.rows.iter().flat_map(|r| [&r.lower, &r.upper]))
++            .any(|v| v.is_finite() && v.abs() >= INFINITY_THRESHOLD)
++        {
++            log::warn!("[LP] {NAME}: finite bound exceeds the backend numeric range");
++            return LpSolution::failed(NAME);
++        }
++
+         let n = problem.n_vars();
+         let Some(form) = Self::conic_form(problem) else {
+             return LpSolution::failed(NAME);
+@@ -309,6 +318,7 @@
+             objective,
+             solved_by: NAME,
+         }
++        .checked(problem)
+     }
+ }
+ 
+diff --git a/swarm-core/src/lp_solver/clp.rs b/swarm-core/src/lp_solver/clp.rs
+--- a/swarm-core/src/lp_solver/clp.rs
++++ b/swarm-core/src/lp_solver/clp.rs
+@@ -278,14 +278,12 @@
+ fn load_symbol<T: Copy>(lib: &Library, name: &[u8]) -> Result<T, String> {
+     // SAFETY: name 은 이 파일에 하드코딩된 NUL 종료 심볼명이고, T 는 바로 위에 원본
+     // C 선언을 적어 둔 함수 포인터 타입이다.
+-    unsafe { lib.get::<T>(name) }
+-        .map(|sym| *sym)
+-        .map_err(|e| {
+-            format!(
+-                "심볼 {} 없음 ({e})",
+-                String::from_utf8_lossy(name).trim_end_matches('\0')
+-            )
+-        })
++    unsafe { lib.get::<T>(name) }.map(|sym| *sym).map_err(|e| {
++        format!(
++            "심볼 {} 없음 ({e})",
++            String::from_utf8_lossy(name).trim_end_matches('\0')
++        )
++    })
+ }
+ 
+ impl ClpApi {
+@@ -553,7 +551,7 @@
+         };
+ 
+         match Self::solve_inner(api, problem, time_limit) {
+-            Ok(sol) => sol,
++            Ok(sol) => sol.checked(problem),
+             Err(why) => {
+                 log::warn!("[LP] {NAME} 풀이 실패 — {why}");
+                 LpSolution::failed(NAME)
+diff --git a/swarm-core/src/lp_solver/microlp_backend.rs b/swarm-core/src/lp_solver/microlp_backend.rs
+--- a/swarm-core/src/lp_solver/microlp_backend.rs
++++ b/swarm-core/src/lp_solver/microlp_backend.rs
+@@ -13,25 +13,13 @@
+ //!
+ //! 변수 경계는 `add_var` 가 `(min, max)` 로 그대로 받고 무한대도 허용하므로 손댈 게 없다.
+ //!
+-//! # 자유 변수 주의 — microlp 0.6 의 결함
+-//!
+-//! **자유 변수(양쪽 경계가 무한)가 둘 이상이면 microlp 가 유계인 LP 를
+-//! `Error::Unbounded` 로 잘못 판정할 수 있다.** 측정한 최소 재현 사례(microlp 0.6,
+-//! 이 크레이트 밖 독립 실행):
+-//!
+-//! ```text
+-//! min x0        x0 자유,  행 x0 >= -3        -> Optimal, x0 = -3   (정답)
+-//! min x0        x0 자유,  행 x0 >= -3
+-//!               x1 자유,  어떤 행에도 없음   -> Err(Unbounded)     (오답)
+-//! min x0        x0 in [-3, inf], x1 자유     -> Optimal, x0 = -3   (정답)
+-//! ```
+-//!
+-//! 즉 "자유 변수 + 어떤 행에도 등장하지 않는 또 다른 자유 변수" 조합에서만 터진다.
+-//! 압축 모델의 변수는 신뢰 영역으로 양쪽이 잘린 변위 `dx, dy` 라 이 조합이 생기지
+-//! 않으므로 **여기서 무한대를 유한 상수로 바꿔치기하지 않았다** — 바꿔치기하면 진짜로
+-//! 무계인 모델이 "아주 큰 해"로 조용히 성공해 버려, 모델 오류를 잡을 길이 사라진다.
+-//! 자유 변수를 쓰는 모델을 새로 만든다면 [`super::LpSolverKind::Clarabel`] 를 쓰거나,
+-//! 변수마다 넉넉한 유한 경계를 명시적으로 넣어라.
++//! # Irrelevant free columns
++//!
++//! microlp 0.6 can incorrectly report a bounded problem as unbounded when a
++//! second, unused free column is present. An unconstrained column with zero
++//! objective is algebraically irrelevant: choose its representative value 0.
++//! Only those columns are fixed. Free columns with a nonzero objective or an
++//! effective constraint retain their original bounds, including true unboundedness.
+ //!
+ //! # Cancellation and deadline
+ //!
+@@ -75,6 +63,31 @@
+         let mut lp = Problem::new(OptimizationDirection::Minimize);
+         let n = problem.n_vars();
+ 
++        // Ordinary compaction models have finite trust bounds, so avoid an
++        // additional allocation/pass unless an irrelevant free column is possible.
++        let used_columns = if (0..n).any(|i| {
++            problem.objective[i] == 0.0
++                && problem.lower[i] == f64::NEG_INFINITY
++                && problem.upper[i] == f64::INFINITY
++        }) {
++            let mut used = vec![false; n];
++            for row in &problem.rows {
++                if should_stop() {
++                    return None;
++                }
++                if row.lower.is_finite() || row.upper.is_finite() {
++                    for (&col, &value) in row.cols.iter().zip(&row.vals) {
++                        if value != 0.0 {
++                            used[col] = true;
++                        }
++                    }
++                }
++            }
++            Some(used)
++        } else {
++            None
++        };
++
+         let mut vars = Vec::with_capacity(n);
+         for i in 0..n {
+             if i % 64 == 0 && should_stop() {
+@@ -85,7 +98,18 @@
+             let c = problem.objective.get(i).copied().unwrap_or(0.0);
+             let lo = problem.lower.get(i).copied().unwrap_or(f64::NEG_INFINITY);
+             let hi = problem.upper.get(i).copied().unwrap_or(f64::INFINITY);
+-            vars.push(lp.add_var(c, (lo, hi)));
++            let irrelevant_free = c == 0.0
++                && lo == f64::NEG_INFINITY
++                && hi == f64::INFINITY
++                && used_columns.as_ref().is_some_and(|used| !used[i]);
++            vars.push(lp.add_var(
++                c,
++                if irrelevant_free {
++                    (0.0, 0.0)
++                } else {
++                    (lo, hi)
++                },
++            ));
+         }
+ 
+         for row in problem.rows.iter() {
+@@ -116,8 +140,8 @@
+ /// 한 행의 `(변수, 계수)` 목록. 같은 열이 두 번 나오면 계수를 합쳐 하나로 만든다.
+ ///
+ /// microlp 의 `add_constraint` 는 **같은 변수가 두 번 나오면 panic 한다.**
+-/// [`LpRow::is_well_formed`] 는 중복 열을 금지하지 않으므로, 모델을 만드는 쪽이
+-/// 여기서 합쳐 주지 않으면 호출부의 사소한 실수가 프로세스를 죽인다.
++/// Public validation rejects duplicate columns; coalescing remains a defensive
++/// safeguard for this private conversion helper.
+ fn coalesced_terms(row: &LpRow, vars: &[Variable]) -> Vec<(Variable, f64)> {
+     let mut terms: Vec<(Variable, f64)> = Vec::with_capacity(row.cols.len());
+     for (idx, &col) in row.cols.iter().enumerate() {
+@@ -239,6 +263,7 @@
+                     objective,
+                     solved_by: NAME,
+                 }
++                .checked(problem)
+             }
+             Ok(SolveOutcome::Interrupted(_)) => {
+                 // 제한에 걸려 채택 가능한 해가 아예 없는 경우. x 는 비운다.
+@@ -478,8 +503,7 @@
+ 
+     /// 자유 변수(양쪽 무한 경계)는 `add_var` 에 무한대를 그대로 넘긴다.
+     /// **행에 등장하는** 자유 변수는 정상적으로 풀린다 — 여기까지가 보장 범위다.
+-    /// 어떤 행에도 없는 자유 변수까지 섞였을 때의 microlp 결함은 모듈 문서의
+-    /// "자유 변수 주의" 절에 적어 두었다.
++    /// Unused zero-cost free columns are normalized independently (module docs).
+     #[test]
+     fn a_free_variable_that_appears_in_a_row_is_solved_normally() {
+         let p = LpProblem {
+diff --git a/swarm-core/src/lp_solver/mod.rs b/swarm-core/src/lp_solver/mod.rs
+--- a/swarm-core/src/lp_solver/mod.rs
++++ b/swarm-core/src/lp_solver/mod.rs
+@@ -202,13 +202,23 @@
+             || self.lower.is_nan()
+             || self.upper.is_nan()
+             || self.lower > self.upper
++            || self.lower == f64::INFINITY
++            || self.upper == f64::NEG_INFINITY
+         {
+             return false;
+         }
+         // 행 하나의 열 수는 보통 한 자릿수라 정렬 사본이 해시셋보다 싸다.
+-        let mut sorted = self.cols.clone();
+-        sorted.sort_unstable();
+-        sorted.windows(2).all(|w| w[0] != w[1])
++        if self.cols.len() <= 8 {
++            // Contact rows are short: avoid one heap allocation per row.
++            self.cols
++                .iter()
++                .enumerate()
++                .all(|(i, col)| !self.cols[..i].contains(col))
++        } else {
++            let mut sorted = self.cols.clone();
++            sorted.sort_unstable();
++            sorted.windows(2).all(|w| w[0] != w[1])
++        }
+     }
+ }
+ 
+@@ -269,7 +279,12 @@
+             return Err(format!("2차 계수가 유효하지 않다: {}", self.quadratic));
+         }
+         for (i, (lo, hi)) in self.lower.iter().zip(self.upper.iter()).enumerate() {
+-            if lo.is_nan() || hi.is_nan() || lo > hi {
++            if lo.is_nan()
++                || hi.is_nan()
++                || lo > hi
++                || *lo == f64::INFINITY
++                || *hi == f64::NEG_INFINITY
++            {
+                 return Err(format!("변수 {i}의 경계가 뒤집혔다: [{lo}, {hi}]"));
+             }
+         }
+@@ -282,6 +297,48 @@
+             }
+         }
+         Ok(())
++    }
++
++    /// Check a primal vector against the original model, independently of the
++    /// backend's status or its internal representation of infinity.
++    pub fn is_primal_feasible(&self, x: &[f64]) -> bool {
++        if x.len() != self.n_vars()
++            || self.lower.len() != x.len()
++            || self.upper.len() != x.len()
++            || !x.iter().all(|v| v.is_finite())
++        {
++            return false;
++        }
++        let within = |v: f64, lo: f64, hi: f64| {
++            let slack = |bound: f64| 1.0e-7 * bound.abs().max(1.0);
++            !lo.is_nan()
++                && !hi.is_nan()
++                && lo <= hi
++                && (lo == f64::NEG_INFINITY || lo.is_finite() && v >= lo - slack(lo))
++                && (hi == f64::INFINITY || hi.is_finite() && v <= hi + slack(hi))
++        };
++        if !x
++            .iter()
++            .zip(&self.lower)
++            .zip(&self.upper)
++            .all(|((&v, &lo), &hi)| within(v, lo, hi))
++        {
++            return false;
++        }
++        self.rows.iter().all(|row| {
++            if row.cols.len() != row.vals.len() {
++                return false;
++            }
++            let activity = row
++                .cols
++                .iter()
++                .zip(&row.vals)
++                .try_fold(0.0, |sum, (&col, &value)| {
++                    let next = sum + value * x.get(col)?;
++                    next.is_finite().then_some(next)
++                });
++            activity.is_some_and(|v| within(v, row.lower, row.upper))
++        })
+     }
+ }
+ 
+@@ -321,6 +378,20 @@
+ }
+ 
+ impl LpSolution {
++    pub(crate) fn checked(self, model: &LpProblem) -> Self {
++        if self.status.is_usable()
++            && (!self.objective.is_finite() || !model.is_primal_feasible(&self.x))
++        {
++            log::warn!(
++                "[LP] {} returned an invalid primal solution",
++                self.solved_by
++            );
++            Self::failed(self.solved_by)
++        } else {
++            self
++        }
++    }
++
+     /// 실패 결과.
+     pub fn failed(solved_by: &'static str) -> Self {
+         Self {
+@@ -356,15 +427,24 @@
+         time_limit: Duration,
+         should_stop: &dyn Fn() -> bool,
+     ) -> LpSolution {
++        let limited = || LpSolution {
++            status: LpStatus::Limit,
++            x: Vec::new(),
++            objective: f64::NAN,
++            solved_by: self.name(),
++        };
+         if should_stop() {
+-            return LpSolution {
+-                status: LpStatus::Limit,
+-                x: Vec::new(),
+-                objective: f64::NAN,
+-                solved_by: self.name(),
+-            };
+-        }
+-        self.solve(problem, time_limit)
++            return limited();
++        }
++        let started = jagua_rs::Instant::now();
++        let solution = self.solve(problem, time_limit);
++        // Native one-shot backends may finish after cancellation or their soft
++        // deadline. Their result must not escape through the common contract.
++        if should_stop() || started.elapsed() >= time_limit {
++            limited()
++        } else {
++            solution
++        }
+     }
+ }
+ 
+diff --git a/swarm-core/src/lp_solver/xpress.rs b/swarm-core/src/lp_solver/xpress.rs
+--- a/swarm-core/src/lp_solver/xpress.rs
++++ b/swarm-core/src/lp_solver/xpress.rs
+@@ -1,806 +1,804 @@
+-//! FICO Xpress 백엔드 — C ABI 를 **런타임에** 동적 로딩한다. LP + QP.
+-//!
+-//! # 왜 링크하지 않고 동적 로딩하는가
+-//!
+-//! Xpress 는 SDK 뿐 아니라 **라이선스**까지 요구한다. `Cargo.toml` 에 박으면 라이선스가 없는
+-//! 모든 머신에서 빌드가 깨지고, 그건 CI 와 개발자 PC 대부분이다. 그래서 [`super::clp`] 와
+-//! 같은 방식으로 `xprs.dll` / `libxprs.so` 를 실행 시점에 찾는다.
+-//!
+-//! 라이선스가 없으면 `XPRSinit` 이 0 이 아닌 값을 낸다. 그 경우를 "라이브러리가 없다"와
+-//! 똑같이 [`LpBackend::availability`] 실패로 다뤄서, [`super::backend_for`] 가 microlp 로
+-//! 물러날 수 있게 한다.
+-//!
+-//! # QP
+-//!
+-//! 압축 모델의 2차 정규화 `(mu/2)·sum(dx² + dy²)` 는 **대각** 행렬이다. Xpress 는
+-//! `XPRSloadqp` 로 목적의 2차부를 (col1, col2, coef) 삼중항으로 받으므로 대각 항만
+-//! `i == j` 로 넘긴다. `XPRSloadqp` 심볼이 없는 (LP 전용) 배포판이면 경고를 남기고
+-//! `XPRSloadlp` 로 강등한다 — 2차항은 해의 유일성을 위한 정규화라서, 없으면 해가
+-//! 퇴화할 뿐 모델 자체가 틀리지는 않는다.
+-//!
+-//! # 상수 검증
+-//!
+-//! 컨트롤/속성 번호는 SDK 헤더에 있지만 이 저장소는 헤더를 두지 않는다. 아래 상수는
+-//! 공개 문서 기준으로 박아 두고 **검증 필요** 표시를 달았다. 틀려도 `XPRSsetintcontrol`
+-//! 등이 0 이 아닌 코드를 돌려줄 뿐이라 치명적이지 않게 설계했다.
+-
+-use std::ffi::{c_char, c_double, c_int, c_void};
+-use std::sync::OnceLock;
+-use std::time::Duration;
+-
+-use libloading::Library;
+-
+-use super::clp::{ColumnMajor, clamp_infinity, to_column_major};
+-use super::{LpBackend, LpProblem, LpSolution, LpStatus};
+-
+-/// 로그·`solved_by` 에 나갈 이름.
+-const NAME: &str = "FICO Xpress";
+-
+-/// 이 값을 먼저 시도한다.
+-const ENV_OVERRIDE: &str = "SWARM_XPRESS_LIB";
+-
+-/// 플랫폼별 표준 파일명. 위에서부터 순서대로 시도한다.
+-const CANDIDATE_NAMES: &[&str] = &["xprs.dll", "libxprs.so", "libxprs.dylib"];
+-
+-/// Xpress 가 무한대로 취급하는 경계값(`XPRS_PLUSINFINITY`).
+-///
+-/// COIN 의 `1e30` 과 다르다. 이보다 큰 값은 무한으로 읽힌다.
+-const XPRS_INFINITY: f64 = 1.0e20;
+-
+-/// 정수 컨트롤 `XPRS_OUTPUTLOG`. 0 으로 두면 라이브러리가 stdout 에 아무것도 안 쓴다.
+-///
+-/// **검증 필요**: 공개 문서 기준 8. 틀리면 로그가 시끄러워질 뿐이다.
+-const XPRS_OUTPUTLOG: c_int = 8;
+-
+-/// 제한 시간 컨트롤 `XPRS_MAXTIME`.
+-///
+-/// **검증 필요**: 번호는 1001 로 알려져 있으나, 버전에 따라 **정수** 컨트롤(초, 음수면
+-/// 해가 없어도 중단)이기도 하고 **실수** 컨트롤이기도 하다. 그래서 실수로 먼저 걸어 보고
+-/// 실패하면 정수로 다시 건다 — 둘 다 실패해도 제한 시간만 못 걸 뿐 풀이는 진행한다.
+-const XPRS_MAXTIME: c_int = 1001;
+-
+-/// 정수 속성 `XPRS_LPSTATUS`. **검증 필요**: 공개 문서 기준 190.
+-///
+-/// # 모듈 머리말의 안전 논거가 여기에는 적용되지 않는다
+-///
+-/// 이 파일은 "상수가 틀려도 0 이 아닌 오류 코드가 올 뿐이라 안전하다" 고 적는다.
+-/// 그 논거는 **컨트롤 설정**(`XPRSsetintcontrol` 등)에 대한 것이고, 아래 두 개는
+-/// **속성 조회 번호**다. 번호가 틀리면 조회가 실패하거나 — 더 나쁘게 — **다른 속성의
+-/// 값을 조용히 돌려준다.** 그러면 풀이 상태나 목적값을 잘못 읽고도 성공으로 보고한다.
+-///
+-/// 그래서 이 둘은 실제 라이브러리로 확인하기 전까지 **결과를 신뢰하면 안 된다**.
+-/// 확인 방법: Xpress 헤더(`xprs.h`)의 `XPRS_LPSTATUS` / `XPRS_LPOBJVAL` 정의와 대조하거나,
+-/// 알려진 최적값을 갖는 작은 LP 를 풀어 목적값이 일치하는지 본다.
+-const XPRS_LPSTATUS: c_int = 190;
+-
+-/// 실수 속성 `XPRS_LPOBJVAL`. **검증 필요**: 공개 문서 기준 2001.
+-/// 위 [`XPRS_LPSTATUS`] 의 경고가 그대로 적용된다.
+-const XPRS_LPOBJVAL: c_int = 2001;
+-
+-// ────────────────────────────────────────────────────────────────────────────
+-// 행 표현 — 상하한 쌍을 Xpress 의 (rowtype, rhs, range) 삼중항으로
+-// ────────────────────────────────────────────────────────────────────────────
+-
+-/// Xpress 가 요구하는 행 서술. 길이는 모두 행 개수와 같다.
+-#[derive(Debug, Clone, PartialEq)]
+-pub(crate) struct RowSpec {
+-    /// `'E' | 'L' | 'G' | 'R' | 'N'` 중 하나.
+-    pub rowtype: Vec<c_char>,
+-    /// 우변.
+-    pub rhs: Vec<f64>,
+-    /// 범위 행(`'R'`)의 폭. 그 밖은 0.
+-    pub range: Vec<f64>,
+-}
+-
+-/// [`super::LpRow`]의 `lower <= a'x <= upper` 를 Xpress 의 행 타입으로 옮긴다.
+-///
+-/// 대응은 이렇다.
+-///
+-/// ```text
+-/// lower == upper                 'E'  rhs = lower
+-/// lower = -inf,  upper 유한      'L'  rhs = upper
+-/// lower 유한,    upper = +inf    'G'  rhs = lower
+-/// 둘 다 유한하고 다름            'R'  rhs = upper,  range = upper - lower
+-/// 둘 다 무한                     'N'  자유 행 — 제약이 아니다
+-/// ```
+-///
+-/// **검증 필요**: 범위 행 `'R'` 의 규약. Xpress 문서 기준 `rhs` 는 범위의 **상한**이고
+-/// `range` 는 폭 `|upper - lower|` 다. 반대(하한 기준)로 읽는 버전이 있다면 범위 제약이
+-/// 아래로 밀린다. 압축 모델은 대부분 단측 부등식(`'G'`/`'L'`)이라 실제 노출은 적다.
+-///
+-/// 자유 행(`'N'`)을 그냥 버리지 않고 남기는 이유는, 행을 지우면 뒤 행의 인덱스가 밀려
+-/// [`to_column_major`] 가 만든 CSC 의 행 인덱스와 어긋나기 때문이다.
+-pub(crate) fn row_specs(problem: &LpProblem) -> RowSpec {
+-    let n = problem.n_rows();
+-    let mut rowtype = Vec::with_capacity(n);
+-    let mut rhs = Vec::with_capacity(n);
+-    let mut range = Vec::with_capacity(n);
+-
+-    for row in &problem.rows {
+-        let lo_finite = row.lower > -XPRS_INFINITY && row.lower.is_finite();
+-        let hi_finite = row.upper < XPRS_INFINITY && row.upper.is_finite();
+-        let (t, r, g) = match (lo_finite, hi_finite) {
+-            (true, true) if row.lower == row.upper => (b'E', row.lower, 0.0),
+-            (true, true) => (b'R', row.upper, row.upper - row.lower),
+-            (false, true) => (b'L', row.upper, 0.0),
+-            (true, false) => (b'G', row.lower, 0.0),
+-            (false, false) => (b'N', 0.0, 0.0),
+-        };
+-        rowtype.push(t as c_char);
+-        rhs.push(clamp_infinity(r, XPRS_INFINITY));
+-        // 범위 폭도 잘라 넘긴다. 상하한이 각각 ±XPRS_INFINITY 바로 안쪽이면 폭이 2e20 까지
+-        // 커져 Xpress 의 무한대 문턱을 넘고, 그러면 범위 행이 조용히 단측 행처럼 읽힌다.
+-        range.push(clamp_infinity(g, XPRS_INFINITY));
+-    }
+-
+-    RowSpec {
+-        rowtype,
+-        rhs,
+-        range,
+-    }
+-}
+-
+-/// 대각 2차 목적항을 `XPRSloadqp` 가 받는 (col1, col2, coef) 삼중항으로 편다.
+-///
+-/// 압축 모델의 정규화는 `(mu/2)·sum(x_i²)` 이라 비대각 항이 없다. 그래서 삼중항은
+-/// `col1 == col2 == i` 인 항목 `n_vars` 개가 전부이고, 두 인덱스 배열의 내용이 같으므로
+-/// 호출부는 같은 버퍼를 두 번 넘긴다.
+-///
+-/// `mu` 가 유한한 양수가 아니면 빈 삼중항이다 — 호출부는 그걸 보고 LP 로 푼다.
+-/// `solve_inner` 안에 인라인으로 두면 라이브러리 없이는 한 줄도 검증할 수 없어서 뺐다.
+-pub(crate) fn diagonal_quadratic_terms(problem: &LpProblem) -> (Vec<c_int>, Vec<f64>) {
+-    let mu = problem.quadratic;
+-    if !(mu.is_finite() && mu > 0.0) {
+-        return (Vec::new(), Vec::new());
+-    }
+-    // to_column_major 가 이미 c_int 범위를 확인하고 거절하므로 여기서 잘릴 일은 없다.
+-    // 그래도 as 캐스팅이 조용히 음수를 만드는 것보다는 잘라 두는 편이 낫다.
+-    let n = problem.n_vars().min(c_int::MAX as usize);
+-    ((0..n as c_int).collect(), vec![mu; n])
+-}
+-
+-/// `XPRS_LPSTATUS` -> [`LpStatus`].
+-///
+-/// 1 OPTIMAL, 2 INFEASIBLE, 5 UNBOUNDED. 3(CUTOFF)·4(UNFINISHED)는 시간/반복 제한에
+-/// 걸린 것이라 [`LpStatus::Limit`], 나머지(0 UNSTARTED, 6·7 UNSOLVED, 8 NONCONVEX)는 실패다.
+-fn map_status(code: c_int) -> LpStatus {
+-    match code {
+-        1 => LpStatus::Optimal,
+-        2 => LpStatus::Infeasible,
+-        5 => LpStatus::Unbounded,
+-        3 | 4 => LpStatus::Limit,
+-        _ => LpStatus::Failed,
+-    }
+-}
+-
+-// ────────────────────────────────────────────────────────────────────────────
+-// C ABI 심볼
+-// ────────────────────────────────────────────────────────────────────────────
+-
+-/// `XPRSprob` 는 불투명 포인터다.
+-type XprsProb = *mut c_void;
+-
+-type FnInit = unsafe extern "C" fn(*const c_char) -> c_int;
+-type FnCreateProb = unsafe extern "C" fn(*mut XprsProb) -> c_int;
+-type FnDestroyProb = unsafe extern "C" fn(XprsProb) -> c_int;
+-type FnSetIntControl = unsafe extern "C" fn(XprsProb, c_int, c_int) -> c_int;
+-type FnSetDblControl = unsafe extern "C" fn(XprsProb, c_int, c_double) -> c_int;
+-type FnLoadLp = unsafe extern "C" fn(
+-    XprsProb,
+-    *const c_char,
+-    c_int,
+-    c_int,
+-    *const c_char,
+-    *const c_double,
+-    *const c_double,
+-    *const c_double,
+-    *const c_int,
+-    *const c_int,
+-    *const c_int,
+-    *const c_double,
+-    *const c_double,
+-    *const c_double,
+-) -> c_int;
+-/// `XPRSloadlp` 뒤에 2차 목적항 삼중항 네 개(개수, col1, col2, coef)가 더 붙는다.
+-type FnLoadQp = unsafe extern "C" fn(
+-    XprsProb,
+-    *const c_char,
+-    c_int,
+-    c_int,
+-    *const c_char,
+-    *const c_double,
+-    *const c_double,
+-    *const c_double,
+-    *const c_int,
+-    *const c_int,
+-    *const c_int,
+-    *const c_double,
+-    *const c_double,
+-    *const c_double,
+-    c_int,
+-    *const c_int,
+-    *const c_int,
+-    *const c_double,
+-) -> c_int;
+-type FnLpOptimize = unsafe extern "C" fn(XprsProb, *const c_char) -> c_int;
+-type FnGetIntAttrib = unsafe extern "C" fn(XprsProb, c_int, *mut c_int) -> c_int;
+-type FnGetDblAttrib = unsafe extern "C" fn(XprsProb, c_int, *mut c_double) -> c_int;
+-type FnGetLpSol = unsafe extern "C" fn(
+-    XprsProb,
+-    *mut c_double,
+-    *mut c_double,
+-    *mut c_double,
+-    *mut c_double,
+-) -> c_int;
+-
+-/// 로딩된 Xpress 진입점 묶음.
+-struct XpressApi {
+-    create_prob: FnCreateProb,
+-    destroy_prob: FnDestroyProb,
+-    load_lp: FnLoadLp,
+-    lp_optimize: FnLpOptimize,
+-    get_int_attrib: FnGetIntAttrib,
+-    get_dbl_attrib: FnGetDblAttrib,
+-    get_lp_sol: FnGetLpSol,
+-    /// 없으면 로그를 못 끄는 것뿐이다.
+-    set_int_control: Option<FnSetIntControl>,
+-    /// 없으면 제한 시간을 실수로 못 거는 것뿐이다.
+-    set_dbl_control: Option<FnSetDblControl>,
+-    /// LP 전용 배포판에는 없다. 없으면 [`XpressBackend::supports_quadratic`] 은 그대로
+-    /// `true` 지만 실제로는 LP 로 강등하고 경고를 남긴다.
+-    load_qp: Option<FnLoadQp>,
+-    _lib: Library,
+-}
+-
+-/// 심볼 하나를 함수 포인터로 꺼낸다.
+-///
+-/// # 안전성
+-///
+-/// 호출부가 `T` 를 실제 심볼의 C 시그니처와 맞춰야 한다. 이 모듈 안에서만 쓴다.
+-fn load_symbol<T: Copy>(lib: &Library, name: &[u8]) -> Result<T, String> {
+-    // SAFETY: name 은 이 파일에 하드코딩된 NUL 종료 심볼명이고, T 는 위에서 원본 C 선언을
+-    // 그대로 옮긴 함수 포인터 타입이다.
+-    unsafe { lib.get::<T>(name) }
+-        .map(|sym| *sym)
+-        .map_err(|e| {
+-            format!(
+-                "심볼 {} 없음 ({e})",
+-                String::from_utf8_lossy(name).trim_end_matches('\0')
+-            )
+-        })
+-}
+-
+-impl XpressApi {
+-    /// 열린 라이브러리에서 심볼을 꺼내고 `XPRSinit` 으로 라이선스를 확인한다.
+-    ///
+-    /// `XPRSfree` 는 **일부러 호출하지 않는다**. 프로세스 안에서 한 번 초기화한 뒤 살아 있는
+-    /// 동안 계속 쓰고, 종료는 OS 에 맡긴다. 중간에 free 하면 아직 살아 있는 다른 `XPRSprob`
+-    /// 가 함께 죽는다.
+-    fn from_library(lib: Library) -> Result<Self, String> {
+-        let init: FnInit = load_symbol(&lib, b"XPRSinit\0")?;
+-        // SAFETY: 널 경로는 "기본 위치에서 라이선스를 찾아라"라는 뜻의 정식 인자다.
+-        let rc = unsafe { init(std::ptr::null()) };
+-        if rc != 0 {
+-            return Err(format!(
+-                "XPRSinit 이 {rc} 를 돌려줬다 — 라이선스가 없거나 만료됐을 가능성이 높다"
+-            ));
+-        }
+-
+-        Ok(Self {
+-            create_prob: load_symbol(&lib, b"XPRScreateprob\0")?,
+-            destroy_prob: load_symbol(&lib, b"XPRSdestroyprob\0")?,
+-            load_lp: load_symbol(&lib, b"XPRSloadlp\0")?,
+-            lp_optimize: load_symbol(&lib, b"XPRSlpoptimize\0")?,
+-            get_int_attrib: load_symbol(&lib, b"XPRSgetintattrib\0")?,
+-            get_dbl_attrib: load_symbol(&lib, b"XPRSgetdblattrib\0")?,
+-            get_lp_sol: load_symbol(&lib, b"XPRSgetlpsol\0")?,
+-            set_int_control: load_symbol(&lib, b"XPRSsetintcontrol\0").ok(),
+-            set_dbl_control: load_symbol(&lib, b"XPRSsetdblcontrol\0").ok(),
+-            load_qp: load_symbol(&lib, b"XPRSloadqp\0").ok(),
+-            _lib: lib,
+-        })
+-    }
+-}
+-
+-/// 시도할 경로 목록을 만든다. `override_path` 가 있으면 **가장 먼저** 온다.
+-///
+-/// 환경변수 읽기와 순서 정하기를 나눈 이유는 [`super::clp`] 와 같다 — 순서 규칙은
+-/// 라이브러리 없이 검증할 수 있는 정책인데, 환경변수를 테스트에서 건드리면
+-/// (2024 에디션에서 `set_var` 는 `unsafe` 다) 병렬로 도는 다른 테스트를 깨뜨린다.
+-fn candidate_paths_from(override_path: Option<&str>) -> Vec<String> {
+-    let mut out = Vec::with_capacity(CANDIDATE_NAMES.len() + 1);
+-    if let Some(p) = override_path {
+-        let p = p.trim();
+-        if !p.is_empty() {
+-            out.push(p.to_string());
+-        }
+-    }
+-    out.extend(CANDIDATE_NAMES.iter().map(|s| (*s).to_string()));
+-    out
+-}
+-
+-/// 시도할 경로 목록. 환경변수가 있으면 **가장 먼저** 온다.
+-fn candidate_paths() -> Vec<String> {
+-    candidate_paths_from(std::env::var(ENV_OVERRIDE).ok().as_deref())
+-}
+-
+-/// 후보를 순서대로 열어 본다. 전부 실패하면 무엇을 어디서 찾았는지 담은 사유를 돌린다.
+-fn load_api() -> Result<XpressApi, String> {
+-    let mut tried: Vec<String> = Vec::new();
+-    for cand in candidate_paths() {
+-        // SAFETY: 라이브러리 로딩은 대상 DLL 의 초기화 코드를 실행한다. 사용자가 지정하거나
+-        // 표준 이름으로 찾은 Xpress 배포판만 대상이다.
+-        match unsafe { Library::new(&cand) } {
+-            Ok(lib) => match XpressApi::from_library(lib) {
+-                Ok(api) => {
+-                    if api.load_qp.is_none() {
+-                        log::warn!(
+-                            "[LP] {NAME}: XPRSloadqp 심볼이 없다 — 2차 정규화를 요청하면 LP 로 강등한다"
+-                        );
+-                    }
+-                    log::info!("[LP] {NAME} 로딩 성공: {cand}");
+-                    return Ok(api);
+-                }
+-                Err(why) => tried.push(format!("{cand} ({why})")),
+-            },
+-            Err(e) => tried.push(format!("{cand} ({e})")),
+-        }
+-    }
+-    Err(format!(
+-        "{NAME} 동적 라이브러리를 열지 못했다. 시도한 파일: {}. \
+-         {ENV_OVERRIDE} 에 전체 경로를 주거나, 파일을 실행 파일 옆 또는 \
+-         PATH/LD_LIBRARY_PATH 에 두면 된다. 라이선스가 없으면 파일이 있어도 실패한다.",
+-        tried.join(", ")
+-    ))
+-}
+-
+-/// 프로세스당 한 번만 로딩·초기화한다. 실패도 캐시한다 — 이유는 [`super::clp`] 와 같다.
+-static XPRESS_API: OnceLock<Result<XpressApi, String>> = OnceLock::new();
+-
+-/// 캐시된 API 를 얻거나 실패 사유를 복제해 돌린다.
+-fn api() -> Result<&'static XpressApi, String> {
+-    match XPRESS_API.get_or_init(load_api) {
+-        Ok(api) => Ok(api),
+-        Err(why) => Err(why.clone()),
+-    }
+-}
+-
+-// ────────────────────────────────────────────────────────────────────────────
+-// 백엔드
+-// ────────────────────────────────────────────────────────────────────────────
+-
+-/// FICO Xpress 백엔드. LP + QP, 라이선스 필요.
+-///
+-/// 상태가 없다 — 로딩된 라이브러리는 프로세스 전역([`XPRESS_API`])에 한 번만 산다.
+-#[derive(Debug, Clone, Copy, Default)]
+-pub struct XpressBackend;
+-
+-impl XpressBackend {
+-    /// 모델을 만들어 풀고 해를 복사해 돌린다.
+-    fn solve_inner(
+-        api: &XpressApi,
+-        problem: &LpProblem,
+-        time_limit: Duration,
+-    ) -> Result<LpSolution, String> {
+-        let n_cols = problem.n_vars();
+-        let n_rows = problem.n_rows();
+-        let matrix: ColumnMajor = to_column_major(problem)?;
+-        let rows = row_specs(problem);
+-
+-        let lb: Vec<f64> = problem
+-            .lower
+-            .iter()
+-            .map(|&v| clamp_infinity(v, XPRS_INFINITY))
+-            .collect();
+-        let ub: Vec<f64> = problem
+-            .upper
+-            .iter()
+-            .map(|&v| clamp_infinity(v, XPRS_INFINITY))
+-            .collect();
+-        let obj = problem.objective.clone();
+-
+-        // 2차부: 대각만. Xpress 는 목적을 c'x + (1/2)·x'Qx 로 본다고 가정하므로 대각
+-        // 원소에 mu 를 그대로 넣으면 (mu/2)·sum(x²) 가 된다.
+-        //
+-        // **검증 필요**: 대각 항의 배수 규약(x² 계수를 그대로 주는지 2배로 주는지)은 실제
+-        // 라이브러리로 확인해야 한다. 틀려도 정규화 세기가 2배 어긋날 뿐이라 해가 깨지지는
+-        // 않는다 — 2차항의 역할이 "같은 폭이면 덜 움직이는 해"를 고르는 것이기 때문이다.
+-        let (qcol, qcoef): (Vec<c_int>, Vec<f64>) = match api.load_qp {
+-            Some(_) => diagonal_quadratic_terms(problem),
+-            None => (Vec::new(), Vec::new()),
+-        };
+-        let use_qp = !qcol.is_empty();
+-        if problem.quadratic > 0.0 && !use_qp {
+-            log::warn!(
+-                "[LP] {NAME}: XPRSloadqp 가 없어 2차 계수 {}을 버리고 LP 로 푼다",
+-                problem.quadratic
+-            );
+-        }
+-
+-        // 모델 이름. Xpress 가 파일명으로도 쓸 수 있으니 공백 없는 ASCII 로 둔다.
+-        let prob_name = b"swarm_compaction\0";
+-
+-        // SAFETY: 아래로 넘기는 포인터는 전부 이 함수 안에서 살아 있는 Vec 이고, 길이는
+-        // n_cols / n_rows / matrix / rows 로 서로 맞춰 두었다. validate() 가 길이 불일치와
+-        // 범위 밖 열 참조를 이미 걸렀다.
+-        let solution = unsafe {
+-            let mut prob: XprsProb = std::ptr::null_mut();
+-            let rc = (api.create_prob)(&mut prob);
+-            if rc != 0 || prob.is_null() {
+-                return Err(format!("XPRScreateprob 이 {rc} 를 돌려줬다"));
+-            }
+-
+-            if let Some(set_int) = api.set_int_control {
+-                // 로그를 끈다. 실패해도 무해하다.
+-                let _ = set_int(prob, XPRS_OUTPUTLOG, 0);
+-            }
+-            // 제한 시간: 실수 컨트롤로 먼저, 실패하면 정수(초, 올림)로 다시.
+-            let secs = time_limit.as_secs_f64().max(0.001);
+-            let dbl_ok = match api.set_dbl_control {
+-                Some(set_dbl) => set_dbl(prob, XPRS_MAXTIME, secs) == 0,
+-                None => false,
+-            };
+-            if !dbl_ok {
+-                if let Some(set_int) = api.set_int_control {
+-                    let _ = set_int(prob, XPRS_MAXTIME, secs.ceil().max(1.0) as c_int);
+-                }
+-            }
+-
+-            let load_rc = match (use_qp, api.load_qp) {
+-                (true, Some(load_qp)) => load_qp(
+-                    prob,
+-                    prob_name.as_ptr() as *const c_char,
+-                    n_cols as c_int,
+-                    n_rows as c_int,
+-                    rows.rowtype.as_ptr(),
+-                    rows.rhs.as_ptr(),
+-                    rows.range.as_ptr(),
+-                    obj.as_ptr(),
+-                    matrix.start.as_ptr(),
+-                    matrix.length.as_ptr(),
+-                    matrix.index.as_ptr(),
+-                    matrix.value.as_ptr(),
+-                    lb.as_ptr(),
+-                    ub.as_ptr(),
+-                    qcol.len() as c_int,
+-                    qcol.as_ptr(),
+-                    qcol.as_ptr(),
+-                    qcoef.as_ptr(),
+-                ),
+-                _ => (api.load_lp)(
+-                    prob,
+-                    prob_name.as_ptr() as *const c_char,
+-                    n_cols as c_int,
+-                    n_rows as c_int,
+-                    rows.rowtype.as_ptr(),
+-                    rows.rhs.as_ptr(),
+-                    rows.range.as_ptr(),
+-                    obj.as_ptr(),
+-                    matrix.start.as_ptr(),
+-                    matrix.length.as_ptr(),
+-                    matrix.index.as_ptr(),
+-                    matrix.value.as_ptr(),
+-                    lb.as_ptr(),
+-                    ub.as_ptr(),
+-                ),
+-            };
+-            if load_rc != 0 {
+-                let _ = (api.destroy_prob)(prob);
+-                return Err(format!("모델 적재가 {load_rc} 를 돌려줬다"));
+-            }
+-
+-            let opt_rc = (api.lp_optimize)(prob, b"\0".as_ptr() as *const c_char);
+-
+-            let mut status_code: c_int = 0;
+-            let status = if (api.get_int_attrib)(prob, XPRS_LPSTATUS, &mut status_code) == 0 {
+-                map_status(status_code)
+-            } else {
+-                LpStatus::Failed
+-            };
+-
+-            let mut objective: c_double = f64::NAN;
+-            let _ = (api.get_dbl_attrib)(prob, XPRS_LPOBJVAL, &mut objective);
+-
+-            let mut x = vec![0.0f64; n_cols];
+-            let usable = status != LpStatus::Failed && n_cols > 0;
+-            if !usable
+-                || (api.get_lp_sol)(
+-                    prob,
+-                    x.as_mut_ptr(),
+-                    std::ptr::null_mut(),
+-                    std::ptr::null_mut(),
+-                    std::ptr::null_mut(),
+-                ) != 0
+-            {
+-                x.clear();
+-            }
+-
+-            let _ = (api.destroy_prob)(prob);
+-
+-            if opt_rc != 0 && status == LpStatus::Failed {
+-                return Err(format!("XPRSlpoptimize 가 {opt_rc} 를 돌려줬다"));
+-            }
+-
+-            LpSolution {
+-                status,
+-                x,
+-                objective,
+-                solved_by: NAME,
+-            }
+-        };
+-
+-        Ok(solution)
+-    }
+-}
+-
+-impl LpBackend for XpressBackend {
+-    fn name(&self) -> &'static str {
+-        NAME
+-    }
+-
+-    fn availability(&self) -> Result<(), String> {
+-        api().map(|_| ())
+-    }
+-
+-    /// Xpress 는 QP 를 푼다. 실제로 2차항을 쓸 수 있는지는 `XPRSloadqp` 심볼 유무에
+-    /// 달렸지만, 그건 로딩된 뒤에야 알 수 있으므로 여기서는 계약대로 `true` 다.
+-    fn supports_quadratic(&self) -> bool {
+-        true
+-    }
+-
+-    fn solve(&self, problem: &LpProblem, time_limit: Duration) -> LpSolution {
+-        if let Err(why) = problem.validate() {
+-            log::warn!("[LP] {NAME}: 모델이 유효하지 않다 — {why}");
+-            return LpSolution::failed(NAME);
+-        }
+-
+-        let api = match api() {
+-            Ok(api) => api,
+-            Err(why) => {
+-                log::warn!("[LP] {NAME} 를 쓸 수 없다 — {why}");
+-                return LpSolution::failed(NAME);
+-            }
+-        };
+-
+-        match Self::solve_inner(api, problem, time_limit) {
+-            Ok(sol) => sol,
+-            Err(why) => {
+-                log::warn!("[LP] {NAME} 풀이 실패 — {why}");
+-                LpSolution::failed(NAME)
+-            }
+-        }
+-    }
+-}
+-
+-#[cfg(test)]
+-mod tests {
+-    use super::*;
+-    use crate::lp_solver::LpRow;
+-
+-    fn tiny_lp() -> LpProblem {
+-        LpProblem {
+-            objective: vec![1.0, 1.0],
+-            quadratic: 0.0,
+-            lower: vec![0.0, 0.0],
+-            upper: vec![10.0, 10.0],
+-            rows: vec![LpRow::greater_or_equal(vec![0, 1], vec![1.0, 1.0], 2.0)],
+-        }
+-    }
+-
+-    #[test]
+-    fn one_sided_and_equality_rows_map_to_the_expected_xpress_row_types() {
+-        let problem = LpProblem {
+-            objective: vec![0.0, 0.0],
+-            quadratic: 0.0,
+-            lower: vec![0.0; 2],
+-            upper: vec![1.0; 2],
+-            rows: vec![
+-                // >= 2  ->  'G'
+-                LpRow::greater_or_equal(vec![0], vec![1.0], 2.0),
+-                // <= 7  ->  'L'
+-                LpRow::less_or_equal(vec![1], vec![1.0], 7.0),
+-                // == 3  ->  'E'
+-                LpRow {
+-                    cols: vec![0],
+-                    vals: vec![1.0],
+-                    lower: 3.0,
+-                    upper: 3.0,
+-                },
+-                // 1 <= a'x <= 4  ->  'R', rhs = 4, range = 3
+-                LpRow {
+-                    cols: vec![1],
+-                    vals: vec![1.0],
+-                    lower: 1.0,
+-                    upper: 4.0,
+-                },
+-                // 자유 행  ->  'N'
+-                LpRow {
+-                    cols: vec![0],
+-                    vals: vec![1.0],
+-                    lower: f64::NEG_INFINITY,
+-                    upper: f64::INFINITY,
+-                },
+-            ],
+-        };
+-
+-        let spec = row_specs(&problem);
+-        let types: Vec<u8> = spec.rowtype.iter().map(|&c| c as u8).collect();
+-        assert_eq!(types, b"GLERN".to_vec());
+-        assert_eq!(spec.rhs, vec![2.0, 7.0, 3.0, 4.0, 0.0]);
+-        assert_eq!(spec.range, vec![0.0, 0.0, 0.0, 3.0, 0.0]);
+-    }
+-
+-    #[test]
+-    fn free_rows_are_kept_so_row_indices_stay_aligned_with_the_csc_matrix() {
+-        let problem = LpProblem {
+-            objective: vec![0.0],
+-            quadratic: 0.0,
+-            lower: vec![0.0],
+-            upper: vec![1.0],
+-            rows: vec![
+-                LpRow {
+-                    cols: vec![0],
+-                    vals: vec![1.0],
+-                    lower: f64::NEG_INFINITY,
+-                    upper: f64::INFINITY,
+-                },
+-                LpRow::greater_or_equal(vec![0], vec![1.0], 1.0),
+-            ],
+-        };
+-        let spec = row_specs(&problem);
+-        assert_eq!(spec.rowtype.len(), problem.n_rows(), "행을 버리면 안 된다");
+-        let csc = to_column_major(&problem).expect("전치가 성공해야 한다");
+-        // 두 번째 행(인덱스 1)이 CSC 에도 그대로 남아 있어야 한다.
+-        assert_eq!(csc.index, vec![0, 1]);
+-    }
+-
+-    #[test]
+-    fn a_diagonal_regularization_becomes_one_triplet_per_variable() {
+-        let mut qp = tiny_lp();
+-        qp.quadratic = 0.25;
+-        let (cols, coefs) = diagonal_quadratic_terms(&qp);
+-        assert_eq!(cols, vec![0, 1], "대각이므로 col1 == col2 == i");
+-        assert_eq!(coefs, vec![0.25, 0.25]);
+-        assert_eq!(cols.len(), qp.n_vars(), "변수마다 정확히 하나");
+-    }
+-
+-    #[test]
+-    fn a_zero_or_non_finite_regularization_produces_no_quadratic_terms_at_all() {
+-        // 빈 삼중항이 곧 "LP 로 풀어라"는 신호다. 0 짜리 항을 n_vars 개 넘기면
+-        // Xpress 가 구조적으로 QP 로 보고 불필요하게 내점법을 돌린다.
+-        for mu in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+-            let mut qp = tiny_lp();
+-            qp.quadratic = mu;
+-            let (cols, coefs) = diagonal_quadratic_terms(&qp);
+-            assert!(cols.is_empty() && coefs.is_empty(), "mu = {mu}");
+-        }
+-    }
+-
+-    #[test]
+-    fn a_range_row_that_would_overflow_the_infinity_threshold_is_clamped() {
+-        // 상하한이 각각 문턱 바로 안쪽이면 폭이 2e20 — 자르지 않으면 Xpress 가
+-        // 이 범위 행을 무한 범위로 읽어 하한이 사라진다.
+-        let problem = LpProblem {
+-            objective: vec![0.0],
+-            quadratic: 0.0,
+-            lower: vec![0.0],
+-            upper: vec![1.0],
+-            rows: vec![LpRow {
+-                cols: vec![0],
+-                vals: vec![1.0],
+-                lower: -9.9e19,
+-                upper: 9.9e19,
+-            }],
+-        };
+-        let spec = row_specs(&problem);
+-        assert_eq!(spec.rowtype.first().map(|&c| c as u8), Some(b'R'));
+-        assert!(
+-            spec.range.first().is_some_and(|&g| g <= XPRS_INFINITY),
+-            "범위 폭이 무한 문턱을 넘으면 안 된다: {:?}",
+-            spec.range
+-        );
+-    }
+-
+-    #[test]
+-    fn the_environment_override_is_tried_before_the_standard_file_names() {
+-        let paths = candidate_paths_from(Some("/opt/xpress/lib/libxprs.so"));
+-        assert_eq!(
+-            paths.first().map(String::as_str),
+-            Some("/opt/xpress/lib/libxprs.so"),
+-            "환경변수 경로가 첫 후보여야 한다"
+-        );
+-        assert_eq!(paths.len(), CANDIDATE_NAMES.len() + 1);
+-        assert_eq!(
+-            paths.get(1).map(String::as_str),
+-            CANDIDATE_NAMES.first().copied()
+-        );
+-    }
+-
+-    #[test]
+-    fn a_blank_environment_override_is_ignored_instead_of_being_opened_as_a_path() {
+-        for blank in [None, Some(""), Some("  \t ")] {
+-            assert_eq!(
+-                candidate_paths_from(blank).len(),
+-                CANDIDATE_NAMES.len(),
+-                "{blank:?} 는 후보가 되면 안 된다"
+-            );
+-        }
+-    }
+-
+-    #[test]
+-    fn availability_names_every_file_it_looked_for_when_the_library_is_missing() {
+-        match XpressBackend.availability() {
+-            // 이 환경에 Xpress 가 깔려 있고 라이선스도 산다 — 검사할 실패 문자열이 없다.
+-            Ok(()) => {}
+-            Err(reason) => {
+-                for name in CANDIDATE_NAMES {
+-                    assert!(
+-                        reason.contains(name),
+-                        "사유에 시도한 파일명 {name} 이 없다: {reason}"
+-                    );
+-                }
+-                assert!(
+-                    reason.contains(ENV_OVERRIDE),
+-                    "사유에 환경변수 이름이 없다: {reason}"
+-                );
+-            }
+-        }
+-    }
+-
+-    #[test]
+-    fn solving_without_the_library_reports_failed_instead_of_panicking() {
+-        let sol = XpressBackend.solve(&tiny_lp(), Duration::from_millis(200));
+-        if XpressBackend.availability().is_err() {
+-            assert_eq!(sol.status, LpStatus::Failed);
+-            assert!(sol.x.is_empty());
+-            assert_eq!(sol.solved_by, NAME);
+-        } else {
+-            assert_eq!(sol.status, LpStatus::Optimal);
+-        }
+-    }
+-
+-    #[test]
+-    fn a_quadratic_request_without_the_library_still_fails_quietly() {
+-        let mut qp = tiny_lp();
+-        qp.quadratic = 0.25;
+-        let sol = XpressBackend.solve(&qp, Duration::from_millis(200));
+-        if XpressBackend.availability().is_err() {
+-            assert_eq!(sol.status, LpStatus::Failed);
+-        }
+-    }
+-
+-    #[test]
+-    fn an_invalid_model_never_reaches_the_vendor_library() {
+-        let broken = LpProblem::default();
+-        let sol = XpressBackend.solve(&broken, Duration::from_millis(200));
+-        assert_eq!(sol.status, LpStatus::Failed);
+-        assert!(sol.x.is_empty());
+-
+-        // 범위 밖 열 참조도 마찬가지다.
+-        let mut bad_col = tiny_lp();
+-        bad_col.rows[0].cols = vec![0, 42];
+-        assert_eq!(
+-            XpressBackend
+-                .solve(&bad_col, Duration::from_millis(200))
+-                .status,
+-            LpStatus::Failed
+-        );
+-    }
+-
+-    #[test]
+-    fn xpress_lpstatus_codes_map_to_the_documented_outcomes() {
+-        assert_eq!(map_status(1), LpStatus::Optimal);
+-        assert_eq!(map_status(2), LpStatus::Infeasible);
+-        assert_eq!(map_status(5), LpStatus::Unbounded);
+-        assert_eq!(map_status(3), LpStatus::Limit);
+-        assert_eq!(map_status(4), LpStatus::Limit);
+-        assert_eq!(map_status(0), LpStatus::Failed);
+-        assert_eq!(map_status(8), LpStatus::Failed);
+-    }
+-
+-    #[test]
+-    fn xpress_declares_itself_quadratic_capable() {
+-        assert!(XpressBackend.supports_quadratic());
+-        assert_eq!(XpressBackend.name(), NAME);
+-    }
+-}
++//! FICO Xpress 백엔드 — C ABI 를 **런타임에** 동적 로딩한다. LP + QP.
++//!
++//! # 왜 링크하지 않고 동적 로딩하는가
++//!
++//! Xpress 는 SDK 뿐 아니라 **라이선스**까지 요구한다. `Cargo.toml` 에 박으면 라이선스가 없는
++//! 모든 머신에서 빌드가 깨지고, 그건 CI 와 개발자 PC 대부분이다. 그래서 [`super::clp`] 와
++//! 같은 방식으로 `xprs.dll` / `libxprs.so` 를 실행 시점에 찾는다.
++//!
++//! 라이선스가 없으면 `XPRSinit` 이 0 이 아닌 값을 낸다. 그 경우를 "라이브러리가 없다"와
++//! 똑같이 [`LpBackend::availability`] 실패로 다뤄서, [`super::backend_for`] 가 microlp 로
++//! 물러날 수 있게 한다.
++//!
++//! # QP
++//!
++//! 압축 모델의 2차 정규화 `(mu/2)·sum(dx² + dy²)` 는 **대각** 행렬이다. Xpress 는
++//! `XPRSloadqp` 로 목적의 2차부를 (col1, col2, coef) 삼중항으로 받으므로 대각 항만
++//! `i == j` 로 넘긴다. `XPRSloadqp` 심볼이 없는 (LP 전용) 배포판이면 경고를 남기고
++//! `XPRSloadlp` 로 강등한다 — 2차항은 해의 유일성을 위한 정규화라서, 없으면 해가
++//! 퇴화할 뿐 모델 자체가 틀리지는 않는다.
++//!
++//! # 상수 검증
++//!
++//! 컨트롤/속성 번호는 SDK 헤더에 있지만 이 저장소는 헤더를 두지 않는다. 아래 상수는
++//! 공개 문서 기준으로 박아 두고 **검증 필요** 표시를 달았다. 틀려도 `XPRSsetintcontrol`
++//! 등이 0 이 아닌 코드를 돌려줄 뿐이라 치명적이지 않게 설계했다.
++
++use std::ffi::{c_char, c_double, c_int, c_void};
++use std::sync::OnceLock;
++use std::time::Duration;
++
++use libloading::Library;
++
++use super::clp::{ColumnMajor, clamp_infinity, to_column_major};
++use super::{LpBackend, LpProblem, LpSolution, LpStatus};
++
++/// 로그·`solved_by` 에 나갈 이름.
++const NAME: &str = "FICO Xpress";
++
++/// 이 값을 먼저 시도한다.
++const ENV_OVERRIDE: &str = "SWARM_XPRESS_LIB";
++
++/// 플랫폼별 표준 파일명. 위에서부터 순서대로 시도한다.
++const CANDIDATE_NAMES: &[&str] = &["xprs.dll", "libxprs.so", "libxprs.dylib"];
++
++/// Xpress 가 무한대로 취급하는 경계값(`XPRS_PLUSINFINITY`).
++///
++/// COIN 의 `1e30` 과 다르다. 이보다 큰 값은 무한으로 읽힌다.
++const XPRS_INFINITY: f64 = 1.0e20;
++
++/// 정수 컨트롤 `XPRS_OUTPUTLOG`. 0 으로 두면 라이브러리가 stdout 에 아무것도 안 쓴다.
++///
++/// **검증 필요**: 공개 문서 기준 8. 틀리면 로그가 시끄러워질 뿐이다.
++const XPRS_OUTPUTLOG: c_int = 8;
++
++/// 제한 시간 컨트롤 `XPRS_MAXTIME`.
++///
++/// **검증 필요**: 번호는 1001 로 알려져 있으나, 버전에 따라 **정수** 컨트롤(초, 음수면
++/// 해가 없어도 중단)이기도 하고 **실수** 컨트롤이기도 하다. 그래서 실수로 먼저 걸어 보고
++/// 실패하면 정수로 다시 건다 — 둘 다 실패해도 제한 시간만 못 걸 뿐 풀이는 진행한다.
++const XPRS_MAXTIME: c_int = 1001;
++
++/// 정수 속성 `XPRS_LPSTATUS`. **검증 필요**: 공개 문서 기준 190.
++///
++/// # 모듈 머리말의 안전 논거가 여기에는 적용되지 않는다
++///
++/// 이 파일은 "상수가 틀려도 0 이 아닌 오류 코드가 올 뿐이라 안전하다" 고 적는다.
++/// 그 논거는 **컨트롤 설정**(`XPRSsetintcontrol` 등)에 대한 것이고, 아래 두 개는
++/// **속성 조회 번호**다. 번호가 틀리면 조회가 실패하거나 — 더 나쁘게 — **다른 속성의
++/// 값을 조용히 돌려준다.** 그러면 풀이 상태나 목적값을 잘못 읽고도 성공으로 보고한다.
++///
++/// 그래서 이 둘은 실제 라이브러리로 확인하기 전까지 **결과를 신뢰하면 안 된다**.
++/// 확인 방법: Xpress 헤더(`xprs.h`)의 `XPRS_LPSTATUS` / `XPRS_LPOBJVAL` 정의와 대조하거나,
++/// 알려진 최적값을 갖는 작은 LP 를 풀어 목적값이 일치하는지 본다.
++const XPRS_LPSTATUS: c_int = 190;
++
++/// 실수 속성 `XPRS_LPOBJVAL`. **검증 필요**: 공개 문서 기준 2001.
++/// 위 [`XPRS_LPSTATUS`] 의 경고가 그대로 적용된다.
++const XPRS_LPOBJVAL: c_int = 2001;
++
++// ────────────────────────────────────────────────────────────────────────────
++// 행 표현 — 상하한 쌍을 Xpress 의 (rowtype, rhs, range) 삼중항으로
++// ────────────────────────────────────────────────────────────────────────────
++
++/// Xpress 가 요구하는 행 서술. 길이는 모두 행 개수와 같다.
++#[derive(Debug, Clone, PartialEq)]
++pub(crate) struct RowSpec {
++    /// `'E' | 'L' | 'G' | 'R' | 'N'` 중 하나.
++    pub rowtype: Vec<c_char>,
++    /// 우변.
++    pub rhs: Vec<f64>,
++    /// 범위 행(`'R'`)의 폭. 그 밖은 0.
++    pub range: Vec<f64>,
++}
++
++/// [`super::LpRow`]의 `lower <= a'x <= upper` 를 Xpress 의 행 타입으로 옮긴다.
++///
++/// 대응은 이렇다.
++///
++/// ```text
++/// lower == upper                 'E'  rhs = lower
++/// lower = -inf,  upper 유한      'L'  rhs = upper
++/// lower 유한,    upper = +inf    'G'  rhs = lower
++/// 둘 다 유한하고 다름            'R'  rhs = upper,  range = upper - lower
++/// 둘 다 무한                     'N'  자유 행 — 제약이 아니다
++/// ```
++///
++/// **검증 필요**: 범위 행 `'R'` 의 규약. Xpress 문서 기준 `rhs` 는 범위의 **상한**이고
++/// `range` 는 폭 `|upper - lower|` 다. 반대(하한 기준)로 읽는 버전이 있다면 범위 제약이
++/// 아래로 밀린다. 압축 모델은 대부분 단측 부등식(`'G'`/`'L'`)이라 실제 노출은 적다.
++///
++/// 자유 행(`'N'`)을 그냥 버리지 않고 남기는 이유는, 행을 지우면 뒤 행의 인덱스가 밀려
++/// [`to_column_major`] 가 만든 CSC 의 행 인덱스와 어긋나기 때문이다.
++pub(crate) fn row_specs(problem: &LpProblem) -> RowSpec {
++    let n = problem.n_rows();
++    let mut rowtype = Vec::with_capacity(n);
++    let mut rhs = Vec::with_capacity(n);
++    let mut range = Vec::with_capacity(n);
++
++    for row in &problem.rows {
++        let lo_finite = row.lower > -XPRS_INFINITY && row.lower.is_finite();
++        let hi_finite = row.upper < XPRS_INFINITY && row.upper.is_finite();
++        let (t, r, g) = match (lo_finite, hi_finite) {
++            (true, true) if row.lower == row.upper => (b'E', row.lower, 0.0),
++            (true, true) => (b'R', row.upper, row.upper - row.lower),
++            (false, true) => (b'L', row.upper, 0.0),
++            (true, false) => (b'G', row.lower, 0.0),
++            (false, false) => (b'N', 0.0, 0.0),
++        };
++        rowtype.push(t as c_char);
++        rhs.push(clamp_infinity(r, XPRS_INFINITY));
++        // 범위 폭도 잘라 넘긴다. 상하한이 각각 ±XPRS_INFINITY 바로 안쪽이면 폭이 2e20 까지
++        // 커져 Xpress 의 무한대 문턱을 넘고, 그러면 범위 행이 조용히 단측 행처럼 읽힌다.
++        range.push(clamp_infinity(g, XPRS_INFINITY));
++    }
++
++    RowSpec {
++        rowtype,
++        rhs,
++        range,
++    }
++}
++
++/// 대각 2차 목적항을 `XPRSloadqp` 가 받는 (col1, col2, coef) 삼중항으로 편다.
++///
++/// 압축 모델의 정규화는 `(mu/2)·sum(x_i²)` 이라 비대각 항이 없다. 그래서 삼중항은
++/// `col1 == col2 == i` 인 항목 `n_vars` 개가 전부이고, 두 인덱스 배열의 내용이 같으므로
++/// 호출부는 같은 버퍼를 두 번 넘긴다.
++///
++/// `mu` 가 유한한 양수가 아니면 빈 삼중항이다 — 호출부는 그걸 보고 LP 로 푼다.
++/// `solve_inner` 안에 인라인으로 두면 라이브러리 없이는 한 줄도 검증할 수 없어서 뺐다.
++pub(crate) fn diagonal_quadratic_terms(problem: &LpProblem) -> (Vec<c_int>, Vec<f64>) {
++    let mu = problem.quadratic;
++    if !(mu.is_finite() && mu > 0.0) {
++        return (Vec::new(), Vec::new());
++    }
++    // to_column_major 가 이미 c_int 범위를 확인하고 거절하므로 여기서 잘릴 일은 없다.
++    // 그래도 as 캐스팅이 조용히 음수를 만드는 것보다는 잘라 두는 편이 낫다.
++    let n = problem.n_vars().min(c_int::MAX as usize);
++    ((0..n as c_int).collect(), vec![mu; n])
++}
++
++/// `XPRS_LPSTATUS` -> [`LpStatus`].
++///
++/// 1 OPTIMAL, 2 INFEASIBLE, 5 UNBOUNDED. 3(CUTOFF)·4(UNFINISHED)는 시간/반복 제한에
++/// 걸린 것이라 [`LpStatus::Limit`], 나머지(0 UNSTARTED, 6·7 UNSOLVED, 8 NONCONVEX)는 실패다.
++fn map_status(code: c_int) -> LpStatus {
++    match code {
++        1 => LpStatus::Optimal,
++        2 => LpStatus::Infeasible,
++        5 => LpStatus::Unbounded,
++        3 | 4 => LpStatus::Limit,
++        _ => LpStatus::Failed,
++    }
++}
++
++// ────────────────────────────────────────────────────────────────────────────
++// C ABI 심볼
++// ────────────────────────────────────────────────────────────────────────────
++
++/// `XPRSprob` 는 불투명 포인터다.
++type XprsProb = *mut c_void;
++
++type FnInit = unsafe extern "C" fn(*const c_char) -> c_int;
++type FnCreateProb = unsafe extern "C" fn(*mut XprsProb) -> c_int;
++type FnDestroyProb = unsafe extern "C" fn(XprsProb) -> c_int;
++type FnSetIntControl = unsafe extern "C" fn(XprsProb, c_int, c_int) -> c_int;
++type FnSetDblControl = unsafe extern "C" fn(XprsProb, c_int, c_double) -> c_int;
++type FnLoadLp = unsafe extern "C" fn(
++    XprsProb,
++    *const c_char,
++    c_int,
++    c_int,
++    *const c_char,
++    *const c_double,
++    *const c_double,
++    *const c_double,
++    *const c_int,
++    *const c_int,
++    *const c_int,
++    *const c_double,
++    *const c_double,
++    *const c_double,
++) -> c_int;
++/// `XPRSloadlp` 뒤에 2차 목적항 삼중항 네 개(개수, col1, col2, coef)가 더 붙는다.
++type FnLoadQp = unsafe extern "C" fn(
++    XprsProb,
++    *const c_char,
++    c_int,
++    c_int,
++    *const c_char,
++    *const c_double,
++    *const c_double,
++    *const c_double,
++    *const c_int,
++    *const c_int,
++    *const c_int,
++    *const c_double,
++    *const c_double,
++    *const c_double,
++    c_int,
++    *const c_int,
++    *const c_int,
++    *const c_double,
++) -> c_int;
++type FnLpOptimize = unsafe extern "C" fn(XprsProb, *const c_char) -> c_int;
++type FnGetIntAttrib = unsafe extern "C" fn(XprsProb, c_int, *mut c_int) -> c_int;
++type FnGetDblAttrib = unsafe extern "C" fn(XprsProb, c_int, *mut c_double) -> c_int;
++type FnGetLpSol = unsafe extern "C" fn(
++    XprsProb,
++    *mut c_double,
++    *mut c_double,
++    *mut c_double,
++    *mut c_double,
++) -> c_int;
++
++/// 로딩된 Xpress 진입점 묶음.
++struct XpressApi {
++    create_prob: FnCreateProb,
++    destroy_prob: FnDestroyProb,
++    load_lp: FnLoadLp,
++    lp_optimize: FnLpOptimize,
++    get_int_attrib: FnGetIntAttrib,
++    get_dbl_attrib: FnGetDblAttrib,
++    get_lp_sol: FnGetLpSol,
++    /// 없으면 로그를 못 끄는 것뿐이다.
++    set_int_control: Option<FnSetIntControl>,
++    /// 없으면 제한 시간을 실수로 못 거는 것뿐이다.
++    set_dbl_control: Option<FnSetDblControl>,
++    /// LP 전용 배포판에는 없다. 없으면 [`XpressBackend::supports_quadratic`] 은 그대로
++    /// `true` 지만 실제로는 LP 로 강등하고 경고를 남긴다.
++    load_qp: Option<FnLoadQp>,
++    _lib: Library,
++}
++
++/// 심볼 하나를 함수 포인터로 꺼낸다.
++///
++/// # 안전성
++///
++/// 호출부가 `T` 를 실제 심볼의 C 시그니처와 맞춰야 한다. 이 모듈 안에서만 쓴다.
++fn load_symbol<T: Copy>(lib: &Library, name: &[u8]) -> Result<T, String> {
++    // SAFETY: name 은 이 파일에 하드코딩된 NUL 종료 심볼명이고, T 는 위에서 원본 C 선언을
++    // 그대로 옮긴 함수 포인터 타입이다.
++    unsafe { lib.get::<T>(name) }.map(|sym| *sym).map_err(|e| {
++        format!(
++            "심볼 {} 없음 ({e})",
++            String::from_utf8_lossy(name).trim_end_matches('\0')
++        )
++    })
++}
++
++impl XpressApi {
++    /// 열린 라이브러리에서 심볼을 꺼내고 `XPRSinit` 으로 라이선스를 확인한다.
++    ///
++    /// `XPRSfree` 는 **일부러 호출하지 않는다**. 프로세스 안에서 한 번 초기화한 뒤 살아 있는
++    /// 동안 계속 쓰고, 종료는 OS 에 맡긴다. 중간에 free 하면 아직 살아 있는 다른 `XPRSprob`
++    /// 가 함께 죽는다.
++    fn from_library(lib: Library) -> Result<Self, String> {
++        let init: FnInit = load_symbol(&lib, b"XPRSinit\0")?;
++        // SAFETY: 널 경로는 "기본 위치에서 라이선스를 찾아라"라는 뜻의 정식 인자다.
++        let rc = unsafe { init(std::ptr::null()) };
++        if rc != 0 {
++            return Err(format!(
++                "XPRSinit 이 {rc} 를 돌려줬다 — 라이선스가 없거나 만료됐을 가능성이 높다"
++            ));
++        }
++
++        Ok(Self {
++            create_prob: load_symbol(&lib, b"XPRScreateprob\0")?,
++            destroy_prob: load_symbol(&lib, b"XPRSdestroyprob\0")?,
++            load_lp: load_symbol(&lib, b"XPRSloadlp\0")?,
++            lp_optimize: load_symbol(&lib, b"XPRSlpoptimize\0")?,
++            get_int_attrib: load_symbol(&lib, b"XPRSgetintattrib\0")?,
++            get_dbl_attrib: load_symbol(&lib, b"XPRSgetdblattrib\0")?,
++            get_lp_sol: load_symbol(&lib, b"XPRSgetlpsol\0")?,
++            set_int_control: load_symbol(&lib, b"XPRSsetintcontrol\0").ok(),
++            set_dbl_control: load_symbol(&lib, b"XPRSsetdblcontrol\0").ok(),
++            load_qp: load_symbol(&lib, b"XPRSloadqp\0").ok(),
++            _lib: lib,
++        })
++    }
++}
++
++/// 시도할 경로 목록을 만든다. `override_path` 가 있으면 **가장 먼저** 온다.
++///
++/// 환경변수 읽기와 순서 정하기를 나눈 이유는 [`super::clp`] 와 같다 — 순서 규칙은
++/// 라이브러리 없이 검증할 수 있는 정책인데, 환경변수를 테스트에서 건드리면
++/// (2024 에디션에서 `set_var` 는 `unsafe` 다) 병렬로 도는 다른 테스트를 깨뜨린다.
++fn candidate_paths_from(override_path: Option<&str>) -> Vec<String> {
++    let mut out = Vec::with_capacity(CANDIDATE_NAMES.len() + 1);
++    if let Some(p) = override_path {
++        let p = p.trim();
++        if !p.is_empty() {
++            out.push(p.to_string());
++        }
++    }
++    out.extend(CANDIDATE_NAMES.iter().map(|s| (*s).to_string()));
++    out
++}
++
++/// 시도할 경로 목록. 환경변수가 있으면 **가장 먼저** 온다.
++fn candidate_paths() -> Vec<String> {
++    candidate_paths_from(std::env::var(ENV_OVERRIDE).ok().as_deref())
++}
++
++/// 후보를 순서대로 열어 본다. 전부 실패하면 무엇을 어디서 찾았는지 담은 사유를 돌린다.
++fn load_api() -> Result<XpressApi, String> {
++    let mut tried: Vec<String> = Vec::new();
++    for cand in candidate_paths() {
++        // SAFETY: 라이브러리 로딩은 대상 DLL 의 초기화 코드를 실행한다. 사용자가 지정하거나
++        // 표준 이름으로 찾은 Xpress 배포판만 대상이다.
++        match unsafe { Library::new(&cand) } {
++            Ok(lib) => match XpressApi::from_library(lib) {
++                Ok(api) => {
++                    if api.load_qp.is_none() {
++                        log::warn!(
++                            "[LP] {NAME}: XPRSloadqp 심볼이 없다 — 2차 정규화를 요청하면 LP 로 강등한다"
++                        );
++                    }
++                    log::info!("[LP] {NAME} 로딩 성공: {cand}");
++                    return Ok(api);
++                }
++                Err(why) => tried.push(format!("{cand} ({why})")),
++            },
++            Err(e) => tried.push(format!("{cand} ({e})")),
++        }
++    }
++    Err(format!(
++        "{NAME} 동적 라이브러리를 열지 못했다. 시도한 파일: {}. \
++         {ENV_OVERRIDE} 에 전체 경로를 주거나, 파일을 실행 파일 옆 또는 \
++         PATH/LD_LIBRARY_PATH 에 두면 된다. 라이선스가 없으면 파일이 있어도 실패한다.",
++        tried.join(", ")
++    ))
++}
++
++/// 프로세스당 한 번만 로딩·초기화한다. 실패도 캐시한다 — 이유는 [`super::clp`] 와 같다.
++static XPRESS_API: OnceLock<Result<XpressApi, String>> = OnceLock::new();
++
++/// 캐시된 API 를 얻거나 실패 사유를 복제해 돌린다.
++fn api() -> Result<&'static XpressApi, String> {
++    match XPRESS_API.get_or_init(load_api) {
++        Ok(api) => Ok(api),
++        Err(why) => Err(why.clone()),
++    }
++}
++
++// ────────────────────────────────────────────────────────────────────────────
++// 백엔드
++// ────────────────────────────────────────────────────────────────────────────
++
++/// FICO Xpress 백엔드. LP + QP, 라이선스 필요.
++///
++/// 상태가 없다 — 로딩된 라이브러리는 프로세스 전역([`XPRESS_API`])에 한 번만 산다.
++#[derive(Debug, Clone, Copy, Default)]
++pub struct XpressBackend;
++
++impl XpressBackend {
++    /// 모델을 만들어 풀고 해를 복사해 돌린다.
++    fn solve_inner(
++        api: &XpressApi,
++        problem: &LpProblem,
++        time_limit: Duration,
++    ) -> Result<LpSolution, String> {
++        let n_cols = problem.n_vars();
++        let n_rows = problem.n_rows();
++        let matrix: ColumnMajor = to_column_major(problem)?;
++        let rows = row_specs(problem);
++
++        let lb: Vec<f64> = problem
++            .lower
++            .iter()
++            .map(|&v| clamp_infinity(v, XPRS_INFINITY))
++            .collect();
++        let ub: Vec<f64> = problem
++            .upper
++            .iter()
++            .map(|&v| clamp_infinity(v, XPRS_INFINITY))
++            .collect();
++        let obj = problem.objective.clone();
++
++        // 2차부: 대각만. Xpress 는 목적을 c'x + (1/2)·x'Qx 로 본다고 가정하므로 대각
++        // 원소에 mu 를 그대로 넣으면 (mu/2)·sum(x²) 가 된다.
++        //
++        // **검증 필요**: 대각 항의 배수 규약(x² 계수를 그대로 주는지 2배로 주는지)은 실제
++        // 라이브러리로 확인해야 한다. 틀려도 정규화 세기가 2배 어긋날 뿐이라 해가 깨지지는
++        // 않는다 — 2차항의 역할이 "같은 폭이면 덜 움직이는 해"를 고르는 것이기 때문이다.
++        let (qcol, qcoef): (Vec<c_int>, Vec<f64>) = match api.load_qp {
++            Some(_) => diagonal_quadratic_terms(problem),
++            None => (Vec::new(), Vec::new()),
++        };
++        let use_qp = !qcol.is_empty();
++        if problem.quadratic > 0.0 && !use_qp {
++            log::warn!(
++                "[LP] {NAME}: XPRSloadqp 가 없어 2차 계수 {}을 버리고 LP 로 푼다",
++                problem.quadratic
++            );
++        }
++
++        // 모델 이름. Xpress 가 파일명으로도 쓸 수 있으니 공백 없는 ASCII 로 둔다.
++        let prob_name = b"swarm_compaction\0";
++
++        // SAFETY: 아래로 넘기는 포인터는 전부 이 함수 안에서 살아 있는 Vec 이고, 길이는
++        // n_cols / n_rows / matrix / rows 로 서로 맞춰 두었다. validate() 가 길이 불일치와
++        // 범위 밖 열 참조를 이미 걸렀다.
++        let solution = unsafe {
++            let mut prob: XprsProb = std::ptr::null_mut();
++            let rc = (api.create_prob)(&mut prob);
++            if rc != 0 || prob.is_null() {
++                return Err(format!("XPRScreateprob 이 {rc} 를 돌려줬다"));
++            }
++
++            if let Some(set_int) = api.set_int_control {
++                // 로그를 끈다. 실패해도 무해하다.
++                let _ = set_int(prob, XPRS_OUTPUTLOG, 0);
++            }
++            // 제한 시간: 실수 컨트롤로 먼저, 실패하면 정수(초, 올림)로 다시.
++            let secs = time_limit.as_secs_f64().max(0.001);
++            let dbl_ok = match api.set_dbl_control {
++                Some(set_dbl) => set_dbl(prob, XPRS_MAXTIME, secs) == 0,
++                None => false,
++            };
++            if !dbl_ok {
++                if let Some(set_int) = api.set_int_control {
++                    let _ = set_int(prob, XPRS_MAXTIME, secs.ceil().max(1.0) as c_int);
++                }
++            }
++
++            let load_rc = match (use_qp, api.load_qp) {
++                (true, Some(load_qp)) => load_qp(
++                    prob,
++                    prob_name.as_ptr() as *const c_char,
++                    n_cols as c_int,
++                    n_rows as c_int,
++                    rows.rowtype.as_ptr(),
++                    rows.rhs.as_ptr(),
++                    rows.range.as_ptr(),
++                    obj.as_ptr(),
++                    matrix.start.as_ptr(),
++                    matrix.length.as_ptr(),
++                    matrix.index.as_ptr(),
++                    matrix.value.as_ptr(),
++                    lb.as_ptr(),
++                    ub.as_ptr(),
++                    qcol.len() as c_int,
++                    qcol.as_ptr(),
++                    qcol.as_ptr(),
++                    qcoef.as_ptr(),
++                ),
++                _ => (api.load_lp)(
++                    prob,
++                    prob_name.as_ptr() as *const c_char,
++                    n_cols as c_int,
++                    n_rows as c_int,
++                    rows.rowtype.as_ptr(),
++                    rows.rhs.as_ptr(),
++                    rows.range.as_ptr(),
++                    obj.as_ptr(),
++                    matrix.start.as_ptr(),
++                    matrix.length.as_ptr(),
++                    matrix.index.as_ptr(),
++                    matrix.value.as_ptr(),
++                    lb.as_ptr(),
++                    ub.as_ptr(),
++                ),
++            };
++            if load_rc != 0 {
++                let _ = (api.destroy_prob)(prob);
++                return Err(format!("모델 적재가 {load_rc} 를 돌려줬다"));
++            }
++
++            let opt_rc = (api.lp_optimize)(prob, b"\0".as_ptr() as *const c_char);
++
++            let mut status_code: c_int = 0;
++            let status = if (api.get_int_attrib)(prob, XPRS_LPSTATUS, &mut status_code) == 0 {
++                map_status(status_code)
++            } else {
++                LpStatus::Failed
++            };
++
++            let mut objective: c_double = f64::NAN;
++            let _ = (api.get_dbl_attrib)(prob, XPRS_LPOBJVAL, &mut objective);
++
++            let mut x = vec![0.0f64; n_cols];
++            let usable = status != LpStatus::Failed && n_cols > 0;
++            if !usable
++                || (api.get_lp_sol)(
++                    prob,
++                    x.as_mut_ptr(),
++                    std::ptr::null_mut(),
++                    std::ptr::null_mut(),
++                    std::ptr::null_mut(),
++                ) != 0
++            {
++                x.clear();
++            }
++
++            let _ = (api.destroy_prob)(prob);
++
++            if opt_rc != 0 && status == LpStatus::Failed {
++                return Err(format!("XPRSlpoptimize 가 {opt_rc} 를 돌려줬다"));
++            }
++
++            LpSolution {
++                status,
++                x,
++                objective,
++                solved_by: NAME,
++            }
++        };
++
++        Ok(solution)
++    }
++}
++
++impl LpBackend for XpressBackend {
++    fn name(&self) -> &'static str {
++        NAME
++    }
++
++    fn availability(&self) -> Result<(), String> {
++        api().map(|_| ())
++    }
++
++    /// Xpress 는 QP 를 푼다. 실제로 2차항을 쓸 수 있는지는 `XPRSloadqp` 심볼 유무에
++    /// 달렸지만, 그건 로딩된 뒤에야 알 수 있으므로 여기서는 계약대로 `true` 다.
++    fn supports_quadratic(&self) -> bool {
++        true
++    }
++
++    fn solve(&self, problem: &LpProblem, time_limit: Duration) -> LpSolution {
++        if let Err(why) = problem.validate() {
++            log::warn!("[LP] {NAME}: 모델이 유효하지 않다 — {why}");
++            return LpSolution::failed(NAME);
++        }
++
++        let api = match api() {
++            Ok(api) => api,
++            Err(why) => {
++                log::warn!("[LP] {NAME} 를 쓸 수 없다 — {why}");
++                return LpSolution::failed(NAME);
++            }
++        };
++
++        match Self::solve_inner(api, problem, time_limit) {
++            Ok(sol) => sol.checked(problem),
++            Err(why) => {
++                log::warn!("[LP] {NAME} 풀이 실패 — {why}");
++                LpSolution::failed(NAME)
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::lp_solver::LpRow;
++
++    fn tiny_lp() -> LpProblem {
++        LpProblem {
++            objective: vec![1.0, 1.0],
++            quadratic: 0.0,
++            lower: vec![0.0, 0.0],
++            upper: vec![10.0, 10.0],
++            rows: vec![LpRow::greater_or_equal(vec![0, 1], vec![1.0, 1.0], 2.0)],
++        }
++    }
++
++    #[test]
++    fn one_sided_and_equality_rows_map_to_the_expected_xpress_row_types() {
++        let problem = LpProblem {
++            objective: vec![0.0, 0.0],
++            quadratic: 0.0,
++            lower: vec![0.0; 2],
++            upper: vec![1.0; 2],
++            rows: vec![
++                // >= 2  ->  'G'
++                LpRow::greater_or_equal(vec![0], vec![1.0], 2.0),
++                // <= 7  ->  'L'
++                LpRow::less_or_equal(vec![1], vec![1.0], 7.0),
++                // == 3  ->  'E'
++                LpRow {
++                    cols: vec![0],
++                    vals: vec![1.0],
++                    lower: 3.0,
++                    upper: 3.0,
++                },
++                // 1 <= a'x <= 4  ->  'R', rhs = 4, range = 3
++                LpRow {
++                    cols: vec![1],
++                    vals: vec![1.0],
++                    lower: 1.0,
++                    upper: 4.0,
++                },
++                // 자유 행  ->  'N'
++                LpRow {
++                    cols: vec![0],
++                    vals: vec![1.0],
++                    lower: f64::NEG_INFINITY,
++                    upper: f64::INFINITY,
++                },
++            ],
++        };
++
++        let spec = row_specs(&problem);
++        let types: Vec<u8> = spec.rowtype.iter().map(|&c| c as u8).collect();
++        assert_eq!(types, b"GLERN".to_vec());
++        assert_eq!(spec.rhs, vec![2.0, 7.0, 3.0, 4.0, 0.0]);
++        assert_eq!(spec.range, vec![0.0, 0.0, 0.0, 3.0, 0.0]);
++    }
++
++    #[test]
++    fn free_rows_are_kept_so_row_indices_stay_aligned_with_the_csc_matrix() {
++        let problem = LpProblem {
++            objective: vec![0.0],
++            quadratic: 0.0,
++            lower: vec![0.0],
++            upper: vec![1.0],
++            rows: vec![
++                LpRow {
++                    cols: vec![0],
++                    vals: vec![1.0],
++                    lower: f64::NEG_INFINITY,
++                    upper: f64::INFINITY,
++                },
++                LpRow::greater_or_equal(vec![0], vec![1.0], 1.0),
++            ],
++        };
++        let spec = row_specs(&problem);
++        assert_eq!(spec.rowtype.len(), problem.n_rows(), "행을 버리면 안 된다");
++        let csc = to_column_major(&problem).expect("전치가 성공해야 한다");
++        // 두 번째 행(인덱스 1)이 CSC 에도 그대로 남아 있어야 한다.
++        assert_eq!(csc.index, vec![0, 1]);
++    }
++
++    #[test]
++    fn a_diagonal_regularization_becomes_one_triplet_per_variable() {
++        let mut qp = tiny_lp();
++        qp.quadratic = 0.25;
++        let (cols, coefs) = diagonal_quadratic_terms(&qp);
++        assert_eq!(cols, vec![0, 1], "대각이므로 col1 == col2 == i");
++        assert_eq!(coefs, vec![0.25, 0.25]);
++        assert_eq!(cols.len(), qp.n_vars(), "변수마다 정확히 하나");
++    }
++
++    #[test]
++    fn a_zero_or_non_finite_regularization_produces_no_quadratic_terms_at_all() {
++        // 빈 삼중항이 곧 "LP 로 풀어라"는 신호다. 0 짜리 항을 n_vars 개 넘기면
++        // Xpress 가 구조적으로 QP 로 보고 불필요하게 내점법을 돌린다.
++        for mu in [0.0, -1.0, f64::NAN, f64::INFINITY] {
++            let mut qp = tiny_lp();
++            qp.quadratic = mu;
++            let (cols, coefs) = diagonal_quadratic_terms(&qp);
++            assert!(cols.is_empty() && coefs.is_empty(), "mu = {mu}");
++        }
++    }
++
++    #[test]
++    fn a_range_row_that_would_overflow_the_infinity_threshold_is_clamped() {
++        // 상하한이 각각 문턱 바로 안쪽이면 폭이 2e20 — 자르지 않으면 Xpress 가
++        // 이 범위 행을 무한 범위로 읽어 하한이 사라진다.
++        let problem = LpProblem {
++            objective: vec![0.0],
++            quadratic: 0.0,
++            lower: vec![0.0],
++            upper: vec![1.0],
++            rows: vec![LpRow {
++                cols: vec![0],
++                vals: vec![1.0],
++                lower: -9.9e19,
++                upper: 9.9e19,
++            }],
++        };
++        let spec = row_specs(&problem);
++        assert_eq!(spec.rowtype.first().map(|&c| c as u8), Some(b'R'));
++        assert!(
++            spec.range.first().is_some_and(|&g| g <= XPRS_INFINITY),
++            "범위 폭이 무한 문턱을 넘으면 안 된다: {:?}",
++            spec.range
++        );
++    }
++
++    #[test]
++    fn the_environment_override_is_tried_before_the_standard_file_names() {
++        let paths = candidate_paths_from(Some("/opt/xpress/lib/libxprs.so"));
++        assert_eq!(
++            paths.first().map(String::as_str),
++            Some("/opt/xpress/lib/libxprs.so"),
++            "환경변수 경로가 첫 후보여야 한다"
++        );
++        assert_eq!(paths.len(), CANDIDATE_NAMES.len() + 1);
++        assert_eq!(
++            paths.get(1).map(String::as_str),
++            CANDIDATE_NAMES.first().copied()
++        );
++    }
++
++    #[test]
++    fn a_blank_environment_override_is_ignored_instead_of_being_opened_as_a_path() {
++        for blank in [None, Some(""), Some("  \t ")] {
++            assert_eq!(
++                candidate_paths_from(blank).len(),
++                CANDIDATE_NAMES.len(),
++                "{blank:?} 는 후보가 되면 안 된다"
++            );
++        }
++    }
++
++    #[test]
++    fn availability_names_every_file_it_looked_for_when_the_library_is_missing() {
++        match XpressBackend.availability() {
++            // 이 환경에 Xpress 가 깔려 있고 라이선스도 산다 — 검사할 실패 문자열이 없다.
++            Ok(()) => {}
++            Err(reason) => {
++                for name in CANDIDATE_NAMES {
++                    assert!(
++                        reason.contains(name),
++                        "사유에 시도한 파일명 {name} 이 없다: {reason}"
++                    );
++                }
++                assert!(
++                    reason.contains(ENV_OVERRIDE),
++                    "사유에 환경변수 이름이 없다: {reason}"
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn solving_without_the_library_reports_failed_instead_of_panicking() {
++        let sol = XpressBackend.solve(&tiny_lp(), Duration::from_millis(200));
++        if XpressBackend.availability().is_err() {
++            assert_eq!(sol.status, LpStatus::Failed);
++            assert!(sol.x.is_empty());
++            assert_eq!(sol.solved_by, NAME);
++        } else {
++            assert_eq!(sol.status, LpStatus::Optimal);
++        }
++    }
++
++    #[test]
++    fn a_quadratic_request_without_the_library_still_fails_quietly() {
++        let mut qp = tiny_lp();
++        qp.quadratic = 0.25;
++        let sol = XpressBackend.solve(&qp, Duration::from_millis(200));
++        if XpressBackend.availability().is_err() {
++            assert_eq!(sol.status, LpStatus::Failed);
++        }
++    }
++
++    #[test]
++    fn an_invalid_model_never_reaches_the_vendor_library() {
++        let broken = LpProblem::default();
++        let sol = XpressBackend.solve(&broken, Duration::from_millis(200));
++        assert_eq!(sol.status, LpStatus::Failed);
++        assert!(sol.x.is_empty());
++
++        // 범위 밖 열 참조도 마찬가지다.
++        let mut bad_col = tiny_lp();
++        bad_col.rows[0].cols = vec![0, 42];
++        assert_eq!(
++            XpressBackend
++                .solve(&bad_col, Duration::from_millis(200))
++                .status,
++            LpStatus::Failed
++        );
++    }
++
++    #[test]
++    fn xpress_lpstatus_codes_map_to_the_documented_outcomes() {
++        assert_eq!(map_status(1), LpStatus::Optimal);
++        assert_eq!(map_status(2), LpStatus::Infeasible);
++        assert_eq!(map_status(5), LpStatus::Unbounded);
++        assert_eq!(map_status(3), LpStatus::Limit);
++        assert_eq!(map_status(4), LpStatus::Limit);
++        assert_eq!(map_status(0), LpStatus::Failed);
++        assert_eq!(map_status(8), LpStatus::Failed);
++    }
++
++    #[test]
++    fn xpress_declares_itself_quadratic_capable() {
++        assert!(XpressBackend.supports_quadratic());
++        assert_eq!(XpressBackend.name(), NAME);
++    }
++}
+diff --git a/swarm-core/src/optimizer/place_groups.rs b/swarm-core/src/optimizer/place_groups.rs
+--- a/swarm-core/src/optimizer/place_groups.rs
++++ b/swarm-core/src/optimizer/place_groups.rs
+@@ -1,329 +1,391 @@
+-//! Rigid placement-unit metadata shared by the Swarm optimizers.
+-//!
+-//! Jagua currently stores one polygon per placed item.  A `PlaceGroup` therefore
+-//! remains a set of ordinary Jagua items; this module only defines which items
+-//! must receive the same world-space rigid delta.
+-
+-use jagua_rs::entities::{Layout, PItemKey};
+-use jagua_rs::geometry::DTransformation;
+-use jagua_rs::probs::spp::entities::SPInstance;
+-use std::error::Error;
+-use std::fmt::{Display, Formatter};
+-
+-/// External identifier of a rigid place group.
+-pub type PlaceGroupId = u64;
+-
+-/// One member of a rigid place group.
+-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-pub struct PlaceGroupMember {
+-    pub item_id: usize,
+-    /// Initial internal Jagua transform.  It defines the relative pose used by
+-    /// the fresh-LBF path.  Runtime moves derive the delta from the current
+-    /// layout so rollback/warm starts remain exact.
+-    pub initial_transform: DTransformation,
+-}
+-
+-/// Input definition for one rigid place group.
+-#[derive(Clone, Debug, PartialEq, Eq)]
+-pub struct PlaceGroupSpec {
+-    pub id: PlaceGroupId,
+-    pub members: Vec<PlaceGroupMember>,
+-}
+-
+-#[derive(Clone, Debug, PartialEq, Eq)]
+-struct PlaceGroup {
+-    id: PlaceGroupId,
+-    members: Vec<PlaceGroupMember>,
+-}
+-
+-/// Validated, immutable lookup table used by LBF, Separator and its workers.
+-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+-pub struct PlaceGroups {
+-    groups: Vec<PlaceGroup>,
+-    item_to_group: Vec<Option<usize>>,
+-}
+-
+-#[derive(Clone, Debug, PartialEq, Eq)]
+-pub enum PlaceGroupError {
+-    TooFewMembers {
+-        group_id: PlaceGroupId,
+-    },
+-    UnknownItem {
+-        group_id: PlaceGroupId,
+-        item_id: usize,
+-    },
+-    RepeatedItem {
+-        item_id: usize,
+-    },
+-    UnsupportedDemand {
+-        item_id: usize,
+-        demand: usize,
+-    },
+-    MissingPlacement {
+-        group_id: PlaceGroupId,
+-        item_id: usize,
+-    },
+-    RepeatedPlacement {
+-        group_id: PlaceGroupId,
+-        item_id: usize,
+-    },
+-    PartiallyPlaced {
+-        group_id: PlaceGroupId,
+-    },
+-}
+-
+-impl Display for PlaceGroupError {
+-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+-        match self {
+-            Self::TooFewMembers { group_id } => {
+-                write!(f, "place group {group_id} must contain at least two items")
+-            }
+-            Self::UnknownItem { group_id, item_id } => write!(
+-                f,
+-                "place group {group_id} references unknown item {item_id}"
+-            ),
+-            Self::RepeatedItem { item_id } => {
+-                write!(f, "item {item_id} occurs in more than one place group")
+-            }
+-            Self::UnsupportedDemand { item_id, demand } => {
+-                write!(
+-                    f,
+-                    "place-group mode item {item_id} must have demand 1, got {demand}"
+-                )
+-            }
+-            Self::MissingPlacement { group_id, item_id } => {
+-                write!(f, "place group {group_id} member {item_id} is not placed")
+-            }
+-            Self::RepeatedPlacement { group_id, item_id } => write!(
+-                f,
+-                "place group {group_id} member {item_id} is placed more than once"
+-            ),
+-            Self::PartiallyPlaced { group_id } => {
+-                write!(f, "place group {group_id} is only partially placed")
+-            }
+-        }
+-    }
+-}
+-
+-impl Error for PlaceGroupError {}
+-
+-impl PlaceGroups {
+-    /// Validates group membership against an imported Swarm instance.
+-    ///
+-    /// Grouped item kinds deliberately require `demand == 1`: Jagua placements
+-    /// are keyed independently, while a group definition is keyed by item id.
+-    /// Callers that start with repeated item kinds must expand them to unique
+-    /// demand-one items before constructing this table.
+-    pub fn new(instance: &SPInstance, specs: Vec<PlaceGroupSpec>) -> Result<Self, PlaceGroupError> {
+-        let mut item_to_group = vec![None; instance.items.len()];
+-        let mut groups = Vec::with_capacity(specs.len());
+-
+-        // Placement units are addressed by item id. In grouped mode every
+-        // placement, including an ungrouped one, must therefore have a unique
+-        // demand-one item id. This is the representation emitted by Uttu.
+-        if !specs.is_empty() {
+-            for item_id in 0..instance.items.len() {
+-                let demand = instance.item_qty(item_id);
+-                if demand != 1 {
+-                    return Err(PlaceGroupError::UnsupportedDemand { item_id, demand });
+-                }
+-            }
+-        }
+-
+-        for spec in specs {
+-            if spec.members.len() < 2 {
+-                return Err(PlaceGroupError::TooFewMembers { group_id: spec.id });
+-            }
+-            let group_idx = groups.len();
+-            for member in &spec.members {
+-                if member.item_id >= instance.items.len() {
+-                    return Err(PlaceGroupError::UnknownItem {
+-                        group_id: spec.id,
+-                        item_id: member.item_id,
+-                    });
+-                }
+-                if item_to_group[member.item_id].replace(group_idx).is_some() {
+-                    return Err(PlaceGroupError::RepeatedItem {
+-                        item_id: member.item_id,
+-                    });
+-                }
+-            }
+-            groups.push(PlaceGroup {
+-                id: spec.id,
+-                members: spec.members,
+-            });
+-        }
+-
+-        Ok(Self {
+-            groups,
+-            item_to_group,
+-        })
+-    }
+-
+-    pub fn is_empty(&self) -> bool {
+-        self.groups.is_empty()
+-    }
+-
+-    pub fn len(&self) -> usize {
+-        self.groups.len()
+-    }
+-
+-    pub fn group_id_of(&self, item_id: usize) -> Option<PlaceGroupId> {
+-        self.group_index(item_id).map(|idx| self.groups[idx].id)
+-    }
+-
+-    pub fn representative(&self, item_id: usize) -> usize {
+-        self.group_index(item_id)
+-            .map(|idx| self.groups[idx].members[0].item_id)
+-            .unwrap_or(item_id)
+-    }
+-
+-    pub fn is_representative(&self, item_id: usize) -> bool {
+-        self.representative(item_id) == item_id
+-    }
+-
+-    pub fn members(&self, item_id: usize) -> &[PlaceGroupMember] {
+-        match self.group_index(item_id) {
+-            Some(idx) => &self.groups[idx].members,
+-            None => &[],
+-        }
+-    }
+-
+-    pub fn member_item_ids(&self, item_id: usize) -> Vec<usize> {
+-        match self.group_index(item_id) {
+-            Some(idx) => self.groups[idx].members.iter().map(|m| m.item_id).collect(),
+-            None => vec![item_id],
+-        }
+-    }
+-
+-    /// If one member is frozen, every member becomes frozen.
+-    pub fn expand_frozen_mask(&self, frozen: &mut [bool]) {
+-        for group in &self.groups {
+-            let group_frozen = group
+-                .members
+-                .iter()
+-                .any(|m| frozen.get(m.item_id).copied().unwrap_or(false));
+-            if group_frozen {
+-                for member in &group.members {
+-                    if let Some(slot) = frozen.get_mut(member.item_id) {
+-                        *slot = true;
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    /// Verifies the all-or-none and exactly-once placement invariant needed by
+-    /// transactional group moves.
+-    pub fn validate_layout(&self, layout: &Layout) -> Result<(), PlaceGroupError> {
+-        for group in &self.groups {
+-            let mut n_present = 0;
+-            for member in &group.members {
+-                let count = layout
+-                    .placed_items
+-                    .values()
+-                    .filter(|pi| pi.item_id == member.item_id)
+-                    .count();
+-                match count {
+-                    0 => {}
+-                    1 => n_present += 1,
+-                    _ => {
+-                        return Err(PlaceGroupError::RepeatedPlacement {
+-                            group_id: group.id,
+-                            item_id: member.item_id,
+-                        });
+-                    }
+-                }
+-            }
+-            if n_present != 0 && n_present != group.members.len() {
+-                return Err(PlaceGroupError::PartiallyPlaced { group_id: group.id });
+-            }
+-        }
+-        Ok(())
+-    }
+-
+-    pub fn placement_key(&self, layout: &Layout, item_id: usize) -> Option<PItemKey> {
+-        layout
+-            .placed_items
+-            .iter()
+-            .find_map(|(pk, pi)| (pi.item_id == item_id).then_some(pk))
+-    }
+-
+-    pub(crate) fn placed_unit_representatives(&self, layout: &Layout) -> Vec<usize> {
+-        layout
+-            .placed_items
+-            .values()
+-            .map(|pi| self.representative(pi.item_id))
+-            .collect::<std::collections::BTreeSet<_>>()
+-            .into_iter()
+-            .collect()
+-    }
+-
+-    /// Returns all target member transforms when `anchor_item_id` is moved to
+-    /// `target`.  `current` selects runtime transforms; passing `None` uses the
+-    /// group's initial transforms (fresh LBF).
+-    pub(crate) fn target_transforms(
+-        &self,
+-        layout: Option<&Layout>,
+-        anchor_item_id: usize,
+-        target: DTransformation,
+-    ) -> Result<Vec<(usize, DTransformation)>, PlaceGroupError> {
+-        let Some(group_idx) = self.group_index(anchor_item_id) else {
+-            return Ok(vec![(anchor_item_id, target)]);
+-        };
+-        let group = &self.groups[group_idx];
+-
+-        let anchor_current = match layout {
+-            Some(layout) => {
+-                let pk = self.placement_key(layout, anchor_item_id).ok_or(
+-                    PlaceGroupError::MissingPlacement {
+-                        group_id: group.id,
+-                        item_id: anchor_item_id,
+-                    },
+-                )?;
+-                layout.placed_items[pk].d_transf
+-            }
+-            None => {
+-                group
+-                    .members
+-                    .iter()
+-                    .find(|m| m.item_id == anchor_item_id)
+-                    .expect("item_to_group and group members must agree")
+-                    .initial_transform
+-            }
+-        };
+-
+-        // Transformation::transform left-multiplies `other`, hence this is
+-        // target * inverse(anchor_current), a world-space rigid delta.
+-        let delta = anchor_current
+-            .compose()
+-            .inverse()
+-            .transform(&target.compose());
+-        group
+-            .members
+-            .iter()
+-            .map(|member| {
+-                let current = match layout {
+-                    Some(layout) => {
+-                        let pk = self.placement_key(layout, member.item_id).ok_or(
+-                            PlaceGroupError::MissingPlacement {
+-                                group_id: group.id,
+-                                item_id: member.item_id,
+-                            },
+-                        )?;
+-                        layout.placed_items[pk].d_transf
+-                    }
+-                    None => member.initial_transform,
+-                };
+-                Ok((
+-                    member.item_id,
+-                    current.compose().transform(&delta).decompose(),
+-                ))
+-            })
+-            .collect()
+-    }
+-
+-    fn group_index(&self, item_id: usize) -> Option<usize> {
+-        self.item_to_group.get(item_id).copied().flatten()
+-    }
+-}
++//! Rigid placement-unit metadata shared by the Swarm optimizers.
++//!
++//! Jagua currently stores one polygon per placed item.  A `PlaceGroup` therefore
++//! remains a set of ordinary Jagua items; this module only defines which items
++//! must receive the same world-space rigid delta.
++
++use jagua_rs::entities::{Layout, PItemKey};
++use jagua_rs::geometry::DTransformation;
++use jagua_rs::probs::spp::entities::{SPInstance, SPSolution};
++use std::error::Error;
++use std::fmt::{Display, Formatter};
++
++/// External identifier of a rigid place group.
++pub type PlaceGroupId = u64;
++
++/// One member of a rigid place group.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct PlaceGroupMember {
++    pub item_id: usize,
++    /// Initial internal Jagua transform.  It defines the relative pose used by
++    /// the fresh-LBF path.  Runtime moves derive the delta from the current
++    /// layout so rollback/warm starts remain exact.
++    pub initial_transform: DTransformation,
++}
++
++/// Input definition for one rigid place group.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct PlaceGroupSpec {
++    pub id: PlaceGroupId,
++    pub members: Vec<PlaceGroupMember>,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++struct PlaceGroup {
++    id: PlaceGroupId,
++    members: Vec<PlaceGroupMember>,
++}
++
++/// Validated, immutable lookup table used by LBF, Separator and its workers.
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub struct PlaceGroups {
++    groups: Vec<PlaceGroup>,
++    item_to_group: Vec<Option<usize>>,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum PlaceGroupError {
++    TooFewMembers {
++        group_id: PlaceGroupId,
++    },
++    UnknownItem {
++        group_id: PlaceGroupId,
++        item_id: usize,
++    },
++    RepeatedItem {
++        item_id: usize,
++    },
++    UnsupportedDemand {
++        item_id: usize,
++        demand: usize,
++    },
++    MissingPlacement {
++        group_id: PlaceGroupId,
++        item_id: usize,
++    },
++    RepeatedPlacement {
++        group_id: PlaceGroupId,
++        item_id: usize,
++    },
++    PartiallyPlaced {
++        group_id: PlaceGroupId,
++    },
++}
++
++impl Display for PlaceGroupError {
++    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
++        match self {
++            Self::TooFewMembers { group_id } => {
++                write!(f, "place group {group_id} must contain at least two items")
++            }
++            Self::UnknownItem { group_id, item_id } => write!(
++                f,
++                "place group {group_id} references unknown item {item_id}"
++            ),
++            Self::RepeatedItem { item_id } => {
++                write!(f, "item {item_id} occurs in more than one place group")
++            }
++            Self::UnsupportedDemand { item_id, demand } => {
++                write!(
++                    f,
++                    "place-group mode item {item_id} must have demand 1, got {demand}"
++                )
++            }
++            Self::MissingPlacement { group_id, item_id } => {
++                write!(f, "place group {group_id} member {item_id} is not placed")
++            }
++            Self::RepeatedPlacement { group_id, item_id } => write!(
++                f,
++                "place group {group_id} member {item_id} is placed more than once"
++            ),
++            Self::PartiallyPlaced { group_id } => {
++                write!(f, "place group {group_id} is only partially placed")
++            }
++        }
++    }
++}
++
++impl Error for PlaceGroupError {}
++
++impl PlaceGroups {
++    /// Validates group membership against an imported Swarm instance.
++    ///
++    /// Grouped item kinds deliberately require `demand == 1`: Jagua placements
++    /// are keyed independently, while a group definition is keyed by item id.
++    /// Callers that start with repeated item kinds must expand them to unique
++    /// demand-one items before constructing this table.
++    pub fn new(instance: &SPInstance, specs: Vec<PlaceGroupSpec>) -> Result<Self, PlaceGroupError> {
++        let mut item_to_group = vec![None; instance.items.len()];
++        let mut groups = Vec::with_capacity(specs.len());
++
++        // Placement units are addressed by item id. In grouped mode every
++        // placement, including an ungrouped one, must therefore have a unique
++        // demand-one item id. This is the representation emitted by Uttu.
++        if !specs.is_empty() {
++            for item_id in 0..instance.items.len() {
++                let demand = instance.item_qty(item_id);
++                if demand != 1 {
++                    return Err(PlaceGroupError::UnsupportedDemand { item_id, demand });
++                }
++            }
++        }
++
++        for spec in specs {
++            if spec.members.len() < 2 {
++                return Err(PlaceGroupError::TooFewMembers { group_id: spec.id });
++            }
++            let group_idx = groups.len();
++            for member in &spec.members {
++                if member.item_id >= instance.items.len() {
++                    return Err(PlaceGroupError::UnknownItem {
++                        group_id: spec.id,
++                        item_id: member.item_id,
++                    });
++                }
++                if item_to_group[member.item_id].replace(group_idx).is_some() {
++                    return Err(PlaceGroupError::RepeatedItem {
++                        item_id: member.item_id,
++                    });
++                }
++            }
++            groups.push(PlaceGroup {
++                id: spec.id,
++                members: spec.members,
++            });
++        }
++
++        Ok(Self {
++            groups,
++            item_to_group,
++        })
++    }
++
++    pub fn is_empty(&self) -> bool {
++        self.groups.is_empty()
++    }
++
++    pub fn len(&self) -> usize {
++        self.groups.len()
++    }
++
++    pub fn group_id_of(&self, item_id: usize) -> Option<PlaceGroupId> {
++        self.group_index(item_id).map(|idx| self.groups[idx].id)
++    }
++
++    pub fn representative(&self, item_id: usize) -> usize {
++        self.group_index(item_id)
++            .map(|idx| self.groups[idx].members[0].item_id)
++            .unwrap_or(item_id)
++    }
++
++    pub fn is_representative(&self, item_id: usize) -> bool {
++        self.representative(item_id) == item_id
++    }
++
++    pub fn members(&self, item_id: usize) -> &[PlaceGroupMember] {
++        match self.group_index(item_id) {
++            Some(idx) => &self.groups[idx].members,
++            None => &[],
++        }
++    }
++
++    pub fn member_item_ids(&self, item_id: usize) -> Vec<usize> {
++        match self.group_index(item_id) {
++            Some(idx) => self.groups[idx].members.iter().map(|m| m.item_id).collect(),
++            None => vec![item_id],
++        }
++    }
++
++    /// If one member is frozen, every member becomes frozen.
++    pub fn expand_frozen_mask(&self, frozen: &mut [bool]) {
++        for group in &self.groups {
++            let group_frozen = group
++                .members
++                .iter()
++                .any(|m| frozen.get(m.item_id).copied().unwrap_or(false));
++            if group_frozen {
++                for member in &group.members {
++                    if let Some(slot) = frozen.get_mut(member.item_id) {
++                        *slot = true;
++                    }
++                }
++            }
++        }
++    }
++
++    /// Verifies the all-or-none and exactly-once placement invariant needed by
++    /// transactional group moves.
++    pub fn validate_layout(&self, layout: &Layout) -> Result<(), PlaceGroupError> {
++        for group in &self.groups {
++            let mut n_present = 0;
++            for member in &group.members {
++                let count = layout
++                    .placed_items
++                    .values()
++                    .filter(|pi| pi.item_id == member.item_id)
++                    .count();
++                match count {
++                    0 => {}
++                    1 => n_present += 1,
++                    _ => {
++                        return Err(PlaceGroupError::RepeatedPlacement {
++                            group_id: group.id,
++                            item_id: member.item_id,
++                        });
++                    }
++                }
++            }
++            if n_present != 0 && n_present != group.members.len() {
++                return Err(PlaceGroupError::PartiallyPlaced { group_id: group.id });
++            }
++        }
++        Ok(())
++    }
++
++    /// Checks a complete candidate against the original rigid relative poses.
++    /// Geometry validation alone cannot detect a member moving within a group.
++    pub fn solution_preserves_relative_poses(&self, solution: &SPSolution) -> bool {
++        if self.is_empty() {
++            return true;
++        }
++        let mut poses = vec![None; self.item_to_group.len()];
++        for pi in solution.layout_snapshot.placed_items.values() {
++            if self.group_index(pi.item_id).is_some() {
++                if poses[pi.item_id].replace(pi.d_transf).is_some() {
++                    return false;
++                }
++            }
++        }
++        let finite = |dt: DTransformation| {
++            let (x, y) = dt.translation();
++            x.is_finite() && y.is_finite() && dt.rotation().is_finite()
++        };
++        self.groups.iter().all(|group| {
++            let anchor = group.members[0];
++            let Some(current_anchor) = poses[anchor.item_id] else {
++                return false;
++            };
++            if !finite(anchor.initial_transform) || !finite(current_anchor) {
++                return false;
++            }
++            // Compute the common delta once in f64. Composing f32/NotNan
++            // matrices can overflow before an invalid candidate is rejected.
++            let delta_angle =
++                current_anchor.rotation() as f64 - anchor.initial_transform.rotation() as f64;
++            let (sin, cos) = delta_angle.sin_cos();
++            let (ix, iy) = anchor.initial_transform.translation();
++            let (cx, cy) = current_anchor.translation();
++            group.members.iter().all(|member| {
++                let Some(actual) = poses[member.item_id] else {
++                    return false;
++                };
++                if !finite(actual) || !finite(member.initial_transform) {
++                    return false;
++                }
++                let (mx, my) = member.initial_transform.translation();
++                let dx = mx as f64 - ix as f64;
++                let dy = my as f64 - iy as f64;
++                let ex = cx as f64 + cos * dx - sin * dy;
++                let ey = cy as f64 + sin * dx + cos * dy;
++                let (ax, ay) = actual.translation();
++                let (ax, ay) = (ax as f64, ay as f64);
++                let angle = (actual.rotation() as f64
++                    - member.initial_transform.rotation() as f64
++                    - delta_angle)
++                    .rem_euclid(std::f64::consts::TAU);
++                let tolerance = 1.0e-4
++                    + 4.0
++                        * f32::EPSILON as f64
++                        * ax.abs().max(ay.abs()).max(ex.abs()).max(ey.abs());
++                angle.min(std::f64::consts::TAU - angle) <= 1.0e-5
++                    && (ax - ex).abs() <= tolerance
++                    && (ay - ey).abs() <= tolerance
++            })
++        })
++    }
++
++    pub fn placement_key(&self, layout: &Layout, item_id: usize) -> Option<PItemKey> {
++        layout
++            .placed_items
++            .iter()
++            .find_map(|(pk, pi)| (pi.item_id == item_id).then_some(pk))
++    }
++
++    pub(crate) fn placed_unit_representatives(&self, layout: &Layout) -> Vec<usize> {
++        layout
++            .placed_items
++            .values()
++            .map(|pi| self.representative(pi.item_id))
++            .collect::<std::collections::BTreeSet<_>>()
++            .into_iter()
++            .collect()
++    }
++
++    /// Returns all target member transforms when `anchor_item_id` is moved to
++    /// `target`.  `current` selects runtime transforms; passing `None` uses the
++    /// group's initial transforms (fresh LBF).
++    pub(crate) fn target_transforms(
++        &self,
++        layout: Option<&Layout>,
++        anchor_item_id: usize,
++        target: DTransformation,
++    ) -> Result<Vec<(usize, DTransformation)>, PlaceGroupError> {
++        let Some(group_idx) = self.group_index(anchor_item_id) else {
++            return Ok(vec![(anchor_item_id, target)]);
++        };
++        let group = &self.groups[group_idx];
++
++        let anchor_current = match layout {
++            Some(layout) => {
++                let pk = self.placement_key(layout, anchor_item_id).ok_or(
++                    PlaceGroupError::MissingPlacement {
++                        group_id: group.id,
++                        item_id: anchor_item_id,
++                    },
++                )?;
++                layout.placed_items[pk].d_transf
++            }
++            None => {
++                group
++                    .members
++                    .iter()
++                    .find(|m| m.item_id == anchor_item_id)
++                    .expect("item_to_group and group members must agree")
++                    .initial_transform
++            }
++        };
++
++        // Transformation::transform left-multiplies `other`, hence this is
++        // target * inverse(anchor_current), a world-space rigid delta.
++        let delta = anchor_current
++            .compose()
++            .inverse()
++            .transform(&target.compose());
++        group
++            .members
++            .iter()
++            .map(|member| {
++                let current = match layout {
++                    Some(layout) => {
++                        let pk = self.placement_key(layout, member.item_id).ok_or(
++                            PlaceGroupError::MissingPlacement {
++                                group_id: group.id,
++                                item_id: member.item_id,
++                            },
++                        )?;
++                        layout.placed_items[pk].d_transf
++                    }
++                    None => member.initial_transform,
++                };
++                Ok((
++                    member.item_id,
++                    current.compose().transform(&delta).decompose(),
++                ))
++            })
++            .collect()
++    }
++
++    fn group_index(&self, item_id: usize) -> Option<usize> {
++        self.item_to_group.get(item_id).copied().flatten()
++    }
++}
+diff --git a/swarm-core/src/sample/uniform_sampler.rs b/swarm-core/src/sample/uniform_sampler.rs
+--- a/swarm-core/src/sample/uniform_sampler.rs
++++ b/swarm-core/src/sample/uniform_sampler.rs
+@@ -1,139 +1,153 @@
+-use itertools::Itertools;
+-use jagua_rs::entities::Item;
+-use jagua_rs::geometry::geo_enums::RotationRange;
+-use jagua_rs::geometry::geo_traits::TransformableFrom;
+-use jagua_rs::geometry::primitives::Rect;
+-use jagua_rs::geometry::{DTransformation, Transformation, normalize_rotation};
+-use ordered_float::OrderedFloat;
+-use rand::prelude::IndexedRandom;
+-use rand::{Rng, RngExt};
+-use std::f32::consts::PI;
+-use std::ops::Range;
+-
+-const ROT_N_SAMPLES: usize = 16; // number of rotations to sample for continuous rotation
+-
+-/// A sampler that creates uniform samples for an item within a bounding box
+-#[derive(Clone, Debug)]
+-pub struct UniformBBoxSampler {
+-    /// The list of possible rotations and their corresponding x and y ranges
+-    rot_entries: Vec<RotEntry>,
+-}
+-
+-#[derive(Clone, Debug)]
+-struct RotEntry {
+-    pub r: f32,
+-    pub x_range: Range<f32>,
+-    pub y_range: Range<f32>,
+-}
+-
+-impl UniformBBoxSampler {
+-    pub fn new(sample_bbox: Rect, item: &Item, container_bbox: Rect) -> Option<Self> {
+-        let rotations = match &item.allowed_rotation {
+-            RotationRange::None => &vec![0.0],
+-            RotationRange::Discrete(r) => r,
+-            RotationRange::Continuous => {
+-                // for continuous rotation, we sample a set of rotations spaced evenly
+-                let step = (2.0 * PI) / ROT_N_SAMPLES as f32;
+-                &(0..ROT_N_SAMPLES).map(|i| i as f32 * step).collect_vec()
+-            }
+-        };
+-
+-        let mut shape_buffer = item.shape_cd.as_ref().clone();
+-
+-        let sample_x_range = sample_bbox.x_min..sample_bbox.x_max;
+-        let sample_y_range = sample_bbox.y_min..sample_bbox.y_max;
+-
+-        // for each possible rotation, calculate the sample ranges (x and y)
+-        // where the item resides fully inside the container and is within the sample bounding box
+-        let rot_entries = rotations
+-            .iter()
+-            .filter_map(|&r| {
+-                let r_shape_bbox = shape_buffer
+-                    .transform_from(item.shape_cd.as_ref(), &Transformation::from_rotation(r))
+-                    .bbox;
+-
+-                //narrow the container range to account for the rotated shape
+-                let cont_x_range = (container_bbox.x_min - r_shape_bbox.x_min)
+-                    ..(container_bbox.x_max - r_shape_bbox.x_max);
+-                let cont_y_range = (container_bbox.y_min - r_shape_bbox.y_min)
+-                    ..(container_bbox.y_max - r_shape_bbox.y_max);
+-
+-                //intersect with the sample bbox
+-                let x_range = intersect_range(&cont_x_range, &sample_x_range);
+-                let y_range = intersect_range(&cont_y_range, &sample_y_range);
+-
+-                //make sure the ranges are not empty
+-                if x_range.is_empty() || y_range.is_empty() {
+-                    None
+-                } else {
+-                    Some(RotEntry {
+-                        r,
+-                        x_range,
+-                        y_range,
+-                    })
+-                }
+-            })
+-            .collect_vec();
+-
+-        match rot_entries.is_empty() {
+-            true => None,
+-            false => Some(Self { rot_entries }),
+-        }
+-    }
+-
+-    pub fn sample(&self, rng: &mut impl Rng) -> DTransformation {
+-        // randomly select a rotation
+-        let r_entry = self.rot_entries.choose(rng).unwrap();
+-
+-        // sample a random x and y value within the valid range
+-        let r = r_entry.r;
+-        let x_sample = rng.random_range(r_entry.x_range.clone());
+-        let y_sample = rng.random_range(r_entry.y_range.clone());
+-
+-        DTransformation::new(r, (x_sample, y_sample))
+-    }
+-
+-    /// [`Self::sample`]의 좌측 편향 변형 (fork 전용, capmods 경로에서 사용).
+-    /// x를 균등 분포 대신 `u^bias_k` (u ~ U[0,1), `bias_k >= 1`)로 변환해 뽑아
+-    /// x_min(좌측) 쪽에 확률 질량을 몰아준다. `bias_k == 1`이면 균등 분포와 동일.
+-    pub fn sample_x_biased(&self, rng: &mut impl Rng, bias_k: f32) -> DTransformation {
+-        let r_entry = self.rot_entries.choose(rng).unwrap();
+-
+-        let r = r_entry.r;
+-        let u: f32 = rng.random_range(0.0..1.0);
+-        let x_sample =
+-            r_entry.x_range.start + (r_entry.x_range.end - r_entry.x_range.start) * u.powf(bias_k);
+-        let y_sample = rng.random_range(r_entry.y_range.clone());
+-
+-        DTransformation::new(r, (x_sample, y_sample))
+-    }
+-}
+-
+-fn intersect_range(a: &Range<f32>, b: &Range<f32>) -> Range<f32> {
+-    let min = f32::max(a.start, b.start);
+-    let max = f32::min(a.end, b.end);
+-    min..max
+-}
+-
+-/// Converts a sample transformation to the closest feasible transformation. (for now just mapping rotation to the closest allowed one)
+-pub fn convert_sample_to_closest_feasible(dt: DTransformation, item: &Item) -> DTransformation {
+-    let feasible_rotation = match &item.allowed_rotation {
+-        RotationRange::None => 0.0,
+-        RotationRange::Discrete(v) => {
+-            // find the closest rotation in the discrete set
+-            v.iter()
+-                .min_by_key(|&&r| {
+-                    // make sure to normalize the delta to the range [-PI, PI]
+-                    let norm_delta = normalize_rotation(dt.rotation() - r);
+-                    OrderedFloat(norm_delta.abs())
+-                })
+-                .cloned()
+-                .unwrap()
+-        }
+-        RotationRange::Continuous => {
+-            // for continuous rotation, we can just use the sample rotation
+-            dt.rotation()
+-        }
+-    };
+-    DTransformation::new(feasible_rotation, dt.translation())
+-}
++use itertools::Itertools;
++use jagua_rs::entities::Item;
++use jagua_rs::geometry::geo_enums::RotationRange;
++use jagua_rs::geometry::geo_traits::TransformableFrom;
++use jagua_rs::geometry::primitives::Rect;
++use jagua_rs::geometry::{DTransformation, Transformation, normalize_rotation};
++use ordered_float::OrderedFloat;
++use rand::prelude::IndexedRandom;
++use rand::{Rng, RngExt};
++use std::f32::consts::PI;
++use std::ops::Range;
++
++const ROT_N_SAMPLES: usize = 16; // number of rotations to sample for continuous rotation
++
++/// A sampler that creates uniform samples for an item within a bounding box
++#[derive(Clone, Debug)]
++pub struct UniformBBoxSampler {
++    /// The list of possible rotations and their corresponding x and y ranges
++    rot_entries: Vec<RotEntry>,
++}
++
++#[derive(Clone, Debug)]
++struct RotEntry {
++    pub r: f32,
++    pub x_range: Range<f32>,
++    pub y_range: Range<f32>,
++}
++
++impl UniformBBoxSampler {
++    pub fn new(sample_bbox: Rect, item: &Item, container_bbox: Rect) -> Option<Self> {
++        let rotations = match &item.allowed_rotation {
++            RotationRange::None => &vec![0.0],
++            RotationRange::Discrete(r) => r,
++            RotationRange::Continuous => {
++                // for continuous rotation, we sample a set of rotations spaced evenly
++                let step = (2.0 * PI) / ROT_N_SAMPLES as f32;
++                &(0..ROT_N_SAMPLES).map(|i| i as f32 * step).collect_vec()
++            }
++        };
++
++        let mut shape_buffer = item.shape_cd.as_ref().clone();
++
++        let sample_x_range = sample_bbox.x_min..sample_bbox.x_max;
++        let sample_y_range = sample_bbox.y_min..sample_bbox.y_max;
++
++        // for each possible rotation, calculate the sample ranges (x and y)
++        // where the item resides fully inside the container and is within the sample bounding box
++        let rot_entries = rotations
++            .iter()
++            .filter_map(|&r| {
++                let r_shape_bbox = shape_buffer
++                    .transform_from(item.shape_cd.as_ref(), &Transformation::from_rotation(r))
++                    .bbox;
++
++                //narrow the container range to account for the rotated shape
++                let cont_x_range = (container_bbox.x_min - r_shape_bbox.x_min)
++                    ..(container_bbox.x_max - r_shape_bbox.x_max);
++                let cont_y_range = (container_bbox.y_min - r_shape_bbox.y_min)
++                    ..(container_bbox.y_max - r_shape_bbox.y_max);
++
++                //intersect with the sample bbox
++                let x_range = intersect_range(&cont_x_range, &sample_x_range);
++                let y_range = intersect_range(&cont_y_range, &sample_y_range);
++
++                //make sure the ranges are not empty
++                if !valid_closed_range(&x_range) || !valid_closed_range(&y_range) {
++                    None
++                } else {
++                    Some(RotEntry {
++                        r,
++                        x_range,
++                        y_range,
++                    })
++                }
++            })
++            .collect_vec();
++
++        match rot_entries.is_empty() {
++            true => None,
++            false => Some(Self { rot_entries }),
++        }
++    }
++
++    pub fn sample(&self, rng: &mut impl Rng) -> DTransformation {
++        // randomly select a rotation
++        let r_entry = self.rot_entries.choose(rng).unwrap();
++
++        // sample a random x and y value within the valid range
++        let r = r_entry.r;
++        let x_sample = sample_range(&r_entry.x_range, rng);
++        let y_sample = sample_range(&r_entry.y_range, rng);
++
++        DTransformation::new(r, (x_sample, y_sample))
++    }
++
++    /// [`Self::sample`]의 좌측 편향 변형 (fork 전용, capmods 경로에서 사용).
++    /// x를 균등 분포 대신 `u^bias_k` (u ~ U[0,1), `bias_k >= 1`)로 변환해 뽑아
++    /// x_min(좌측) 쪽에 확률 질량을 몰아준다. `bias_k == 1`이면 균등 분포와 동일.
++    pub fn sample_x_biased(&self, rng: &mut impl Rng, bias_k: f32) -> DTransformation {
++        let r_entry = self.rot_entries.choose(rng).unwrap();
++
++        let r = r_entry.r;
++        let u: f32 = rng.random_range(0.0..1.0);
++        let x_sample =
++            r_entry.x_range.start + (r_entry.x_range.end - r_entry.x_range.start) * u.powf(bias_k);
++        let y_sample = sample_range(&r_entry.y_range, rng);
++
++        DTransformation::new(r, (x_sample, y_sample))
++    }
++}
++
++// A closed feasible interval may contain exactly one coordinate. rand's
++// half-open range cannot represent that case, so sample its fixed endpoint.
++fn valid_closed_range(range: &Range<f32>) -> bool {
++    range.start.is_finite() && range.end.is_finite() && range.start <= range.end
++}
++
++fn sample_range(range: &Range<f32>, rng: &mut impl Rng) -> f32 {
++    if range.start == range.end {
++        range.start
++    } else {
++        rng.random_range(range.clone())
++    }
++}
++
++fn intersect_range(a: &Range<f32>, b: &Range<f32>) -> Range<f32> {
++    let min = f32::max(a.start, b.start);
++    let max = f32::min(a.end, b.end);
++    min..max
++}
++
++/// Converts a sample transformation to the closest feasible transformation. (for now just mapping rotation to the closest allowed one)
++pub fn convert_sample_to_closest_feasible(dt: DTransformation, item: &Item) -> DTransformation {
++    let feasible_rotation = match &item.allowed_rotation {
++        RotationRange::None => 0.0,
++        RotationRange::Discrete(v) => {
++            // find the closest rotation in the discrete set
++            v.iter()
++                .min_by_key(|&&r| {
++                    // make sure to normalize the delta to the range [-PI, PI]
++                    let norm_delta = normalize_rotation(dt.rotation() - r);
++                    OrderedFloat(norm_delta.abs())
++                })
++                .cloned()
++                .unwrap()
++        }
++        RotationRange::Continuous => {
++            // for continuous rotation, we can just use the sample rotation
++            dt.rotation()
++        }
++    };
++    DTransformation::new(feasible_rotation, dt.translation())
++}
+diff --git a/swarm-core/tests/algorithm_audit.rs b/swarm-core/tests/algorithm_audit.rs
+new file mode 100644
+--- /dev/null
++++ b/swarm-core/tests/algorithm_audit.rs
+@@ -0,0 +1,271 @@
++use swarm_core::lp_solver::{
++    LpBackend, LpProblem, LpRow, LpStatus, clarabel_backend::ClarabelBackend,
++    microlp_backend::MicrolpBackend,
++};
++use std::time::Duration;
++
++fn bounded_lp() -> LpProblem {
++    LpProblem {
++        objective: vec![0.0],
++        lower: vec![0.0],
++        upper: vec![1.0],
++        rows: vec![],
++        quadratic: 0.0,
++    }
++}
++
++#[test]
++fn impossible_infinity_directions_are_rejected_before_solver_entry() {
++    for (lower, upper) in [
++        (f64::INFINITY, f64::INFINITY),
++        (f64::NEG_INFINITY, f64::NEG_INFINITY),
++    ] {
++        let mut p = bounded_lp();
++        p.lower[0] = lower;
++        p.upper[0] = upper;
++        assert!(
++            p.validate().is_err(),
++            "invalid variable bounds {lower}..{upper}"
++        );
++        let mut p = bounded_lp();
++        p.rows.push(LpRow {
++            cols: vec![0],
++            vals: vec![1.0],
++            lower,
++            upper,
++        });
++        assert!(p.validate().is_err(), "invalid row bounds {lower}..{upper}");
++    }
++}
++
++#[test]
++fn large_finite_bound_is_never_silently_dropped() {
++    let mut p = bounded_lp();
++    p.lower[0] = 1.0e21;
++    p.upper[0] = 2.0e21;
++    let sol = ClarabelBackend.solve(&p, Duration::from_secs(1));
++    assert!(
++        !sol.status.is_usable()
++            || sol.x.len() == 1 && sol.x[0] >= p.lower[0] && sol.x[0] <= p.upper[0],
++        "{sol:?}"
++    );
++}
++
++#[test]
++fn zero_coefficient_constraints_do_not_hide_infeasibility() {
++    for backend in [&MicrolpBackend as &dyn LpBackend, &ClarabelBackend] {
++        let mut p = bounded_lp();
++        p.rows
++            .push(LpRow::greater_or_equal(vec![0], vec![0.0], 1.0));
++        let sol = backend.solve(&p, Duration::from_secs(1));
++        assert_eq!(
++            sol.status,
++            LpStatus::Infeasible,
++            "{}: {sol:?}",
++            backend.name()
++        );
++        p.rows[0].lower = 0.0;
++        assert_eq!(
++            backend.solve(&p, Duration::from_secs(1)).status,
++            LpStatus::Optimal
++        );
++    }
++}
++
++#[test]
++fn uniform_sampler_keeps_zero_width_feasible_intervals() {
++    use jagua_rs::entities::Instance;
++    use jagua_rs::io::import::Importer;
++    use jagua_rs::probs::spp::io::ext_repr::ExtSPInstance;
++    use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
++    use swarm_core::sample::uniform_sampler::UniformBBoxSampler;
++    let ext: ExtSPInstance =
++        serde_json::from_value(serde_json::json!({"name":"exact-fit","strip_height":4.0,
++        "items":[{"id":0,"demand":1,"allowed_orientations":[0.0],"shape":{"type":"rectangle",
++        "data":{"x_min":0.0,"y_min":0.0,"width":4.0,"height":4.0}}}]}))
++        .unwrap();
++    let c = swarm_core::config::DEFAULT_SWARM_CONFIG;
++    let importer = Importer::new(
++        c.cde_config,
++        c.poly_simpl_tolerance,
++        c.min_item_separation,
++        c.narrow_concavity_cutoff_ratio,
++    );
++    let instance = jagua_rs::probs::spp::io::import_instance(&importer, &ext).unwrap();
++    let item = instance.item(0);
++    let bbox = item.shape_cd.bbox;
++    let sampler =
++        UniformBBoxSampler::new(bbox, item, bbox).expect("an exact-fitting placement is feasible");
++    let mut rng = Xoshiro256PlusPlus::seed_from_u64(1);
++    for _ in 0..16 {
++        assert_eq!(sampler.sample(&mut rng).translation(), (0.0, 0.0));
++        assert_eq!(
++            sampler.sample_x_biased(&mut rng, 2.0).translation(),
++            (0.0, 0.0)
++        );
++    }
++    let mut too_small = bbox;
++    too_small.x_max -= 0.25;
++    assert!(UniformBBoxSampler::new(bbox, item, too_small).is_none());
++    let mut wider = bbox;
++    wider.x_max += 4.0;
++    let one_axis = UniformBBoxSampler::new(wider, item, wider).unwrap();
++    for _ in 0..32 {
++        let (x, y) = one_axis.sample(&mut rng).translation();
++        assert!((0.0..4.0).contains(&x));
++        assert_eq!(y, 0.0);
++    }
++}
++
++#[test]
++fn primal_validation_rejects_nonfinite_truncated_and_infeasible_results() {
++    let mut p = bounded_lp();
++    p.rows
++        .push(LpRow::greater_or_equal(vec![0], vec![2.0], 1.0));
++    assert!(p.is_primal_feasible(&[0.75]));
++    for x in [
++        vec![],
++        vec![0.75, 0.0],
++        vec![f64::NAN],
++        vec![f64::INFINITY],
++        vec![0.0],
++        vec![2.0],
++    ] {
++        assert!(!p.is_primal_feasible(&x), "{x:?}");
++    }
++    p.rows[0].cols[0] = 99;
++    assert!(!p.is_primal_feasible(&[0.75]));
++}
++
++#[test]
++fn sparse_row_duplicate_check_matches_set_oracle() {
++    use std::collections::HashSet;
++    for len in 1..=24 {
++        for modulus in 1..=27 {
++            let cols: Vec<_> = (0..len).map(|i| (i * 7) % modulus).collect();
++            let expected = cols.iter().collect::<HashSet<_>>().len() == cols.len();
++            let row = LpRow::less_or_equal(cols, vec![1.0; len], 3.0);
++            assert_eq!(row.is_well_formed(), expected);
++        }
++    }
++}
++
++#[test]
++fn built_in_lp_backends_match_vertex_enumeration() {
++    for backend in [&MicrolpBackend as &dyn LpBackend, &ClarabelBackend] {
++        for i in 1..=30 {
++            let upper = 2.0 + (i % 4) as f64;
++            let threshold = upper * (0.2 + (i % 5) as f64 * 0.3);
++            let objective = vec![(i % 7) as f64 - 3.0, (i % 3) as f64 - 1.0];
++            let p = LpProblem {
++                objective,
++                lower: vec![0.0; 2],
++                upper: vec![upper; 2],
++                rows: vec![LpRow::greater_or_equal(
++                    vec![0, 1],
++                    vec![1.0, 1.0],
++                    threshold,
++                )],
++                quadratic: 0.0,
++            };
++            let points = [
++                [0.0, 0.0],
++                [0.0, upper],
++                [upper, 0.0],
++                [upper, upper],
++                [0.0, threshold],
++                [threshold, 0.0],
++                [upper, threshold - upper],
++                [threshold - upper, upper],
++            ];
++            let best = points
++                .iter()
++                .filter(|x| x.iter().all(|v| *v >= 0.0 && *v <= upper) && x[0] + x[1] >= threshold)
++                .map(|x| x[0] * p.objective[0] + x[1] * p.objective[1])
++                .reduce(f64::min)
++                .unwrap();
++            let sol = backend.solve(&p, Duration::from_secs(1));
++            assert_eq!(
++                sol.status,
++                LpStatus::Optimal,
++                "{} case {i}: {sol:?}",
++                backend.name()
++            );
++            assert!(p.is_primal_feasible(&sol.x));
++            assert!(
++                (sol.objective - best).abs() < 1.0e-5,
++                "{} case {i}: {sol:?}, oracle={best}",
++                backend.name()
++            );
++        }
++    }
++}
++
++#[test]
++fn clarabel_quadratic_solution_matches_analytic_minimum() {
++    let p = LpProblem {
++        objective: vec![-2.0, -4.0, 1.0],
++        lower: vec![0.0; 3],
++        upper: vec![10.0; 3],
++        rows: vec![],
++        quadratic: 2.0,
++    };
++    let sol = ClarabelBackend.solve(&p, Duration::from_secs(1));
++    assert_eq!(sol.status, LpStatus::Optimal);
++    for (actual, expected) in sol.x.iter().zip([1.0, 2.0, 0.0]) {
++        assert!((actual - expected).abs() < 1.0e-4, "{sol:?}");
++    }
++}
++
++#[test]
++fn irrelevant_free_column_does_not_turn_bounded_lp_into_unbounded() {
++    let mut p = LpProblem {
++        objective: vec![1.0, 0.0],
++        lower: vec![f64::NEG_INFINITY; 2],
++        upper: vec![f64::INFINITY; 2],
++        rows: vec![LpRow::greater_or_equal(vec![0], vec![1.0], -3.0)],
++        quadratic: 0.0,
++    };
++    let sol = MicrolpBackend.solve(&p, Duration::from_secs(1));
++    assert_eq!(sol.status, LpStatus::Optimal, "{sol:?}");
++    assert!((sol.objective + 3.0).abs() < 1.0e-7);
++    assert!(p.is_primal_feasible(&sol.x));
++    // A nonzero objective on the free column really is unbounded.
++    p.objective[1] = -1.0;
++    assert_eq!(
++        MicrolpBackend.solve(&p, Duration::from_secs(1)).status,
++        LpStatus::Unbounded
++    );
++}
++
++#[test]
++fn one_shot_backend_result_is_discarded_after_cancellation() {
++    use std::sync::atomic::{AtomicBool, Ordering};
++    struct CompletingBackend(AtomicBool);
++    impl LpBackend for CompletingBackend {
++        fn name(&self) -> &'static str {
++            "test completion"
++        }
++        fn availability(&self) -> Result<(), String> {
++            Ok(())
++        }
++        fn supports_quadratic(&self) -> bool {
++            false
++        }
++        fn solve(&self, _: &LpProblem, _: Duration) -> swarm_core::lp_solver::LpSolution {
++            self.0.store(true, Ordering::SeqCst);
++            swarm_core::lp_solver::LpSolution {
++                status: LpStatus::Optimal,
++                x: vec![0.0],
++                objective: 0.0,
++                solved_by: self.name(),
++            }
++        }
++    }
++    let backend = CompletingBackend(AtomicBool::new(false));
++    let result = backend.solve_with_control(&bounded_lp(), Duration::from_secs(1), &|| {
++        backend.0.load(Ordering::SeqCst)
++    });
++    assert_eq!(result.status, LpStatus::Limit);
++    assert!(result.x.is_empty());
++}
+diff --git a/swarm-core/tests/lbf_order_feasibility.rs b/swarm-core/tests/lbf_order_feasibility.rs
+--- a/swarm-core/tests/lbf_order_feasibility.rs
++++ b/swarm-core/tests/lbf_order_feasibility.rs
+@@ -1,137 +1,149 @@
+-//! LBF 배치 순서 모드별로 **초기 해가 실제로 겹침 없는지** 검증하는 하네스.
+-//!
+-//! # 왜 필요한가
+-//!
+-//! 순서 모드를 도입할 때는 폭·밀도만 쟀고 **실행 가능성은 재지 않았다**.
+-//! LBF 는 후보를 CDE 로 검증하고 채택하므로 원리상 겹침이 없어야 하지만,
+-//! 그건 검증이 아니라 가정이다. 여기서 두 오라클로 직접 확인한다:
+-//!
+-//! * `CollisionTracker::get_total_loss()` — 솔버가 쓰는 판정 (jagua CDE).
+-//! * `flat_layout_collision_counts` — 인증기·콜백 진단이 쓰는 판정
+-//!   (양방향 다각형 재검사).
+-//!
+-//! 배치 **수량**도 함께 본다. 겹침이 없어도 조각을 다 못 놓으면 그건 다른 결함이다.
+-//!
+-//! ```powershell
+-//! $env:SWARM_INPUT='C:\Caplanet\AiWorks\InputData\여성WSjk_비교용-G_New_SwarmV1.json'
+-//! cargo test -p swarm-core --release --features "simd,capmods,adaptive,structure-first" `
+-//!   --test lbf_order_feasibility -- --ignored --nocapture --test-threads=1
+-//! ```
+-
+-use jagua_rs::io::import::Importer;
+-use jagua_rs::probs::spp::entities::SPInstance;
+-use rand::SeedableRng;
+-use rand::rngs::Xoshiro256PlusPlus;
+-use swarm_core::config::DEFAULT_SWARM_CONFIG;
+-use swarm_core::consts::LBF_SAMPLE_CONFIG;
+-use swarm_core::eval::lbf_evaluator::flat_layout_collision_counts;
+-use swarm_core::optimizer::lbf::{LBFBuilder, LbfOrderMode};
+-use swarm_core::optimizer::separator::Separator;
+-use swarm_core::util::io::read_spp_input;
+-use std::path::{Path, PathBuf};
+-
+-fn input_path() -> PathBuf {
+-    match std::env::var("SWARM_INPUT") {
+-        Ok(p) => PathBuf::from(p),
+-        Err(_) => Path::new(env!("CARGO_MANIFEST_DIR"))
+-            .join("../data/input")
+-            .join("wsjk156.json"),
+-    }
+-}
+-
+-fn load(path: &Path) -> SPInstance {
+-    let (ext, _) = read_spp_input(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+-    let c = DEFAULT_SWARM_CONFIG;
+-    let imp = Importer::new(
+-        c.cde_config,
+-        c.poly_simpl_tolerance,
+-        c.min_item_separation,
+-        c.narrow_concavity_cutoff_ratio,
+-    );
+-    jagua_rs::probs::spp::io::import_instance(&imp, &ext).expect("import")
+-}
+-
+-#[test]
+-#[ignore = "실측 하네스 — 여섯 모드를 모두 구성한다"]
+-fn every_lbf_order_mode_produces_a_collision_free_initial_layout() {
+-    let path = input_path();
+-    let instance = load(&path);
+-    let c = DEFAULT_SWARM_CONFIG;
+-    let n_items = instance.total_item_qty();
+-    let seeds: Vec<u64> = std::env::var("ORDER_SEEDS")
+-        .unwrap_or_else(|_| "0,1,2".into())
+-        .split(',')
+-        .filter_map(|v| v.trim().parse().ok())
+-        .collect();
+-
+-    println!("\n══════ LBF 배치 순서별 초기 해 실행 가능성 ══════");
+-    println!("  입력    {}", path.display());
+-    println!("  조각    {n_items}개 / seed {seeds:?} / lbf_x={} lbf_y={}", c.lbf_x_multiplier, c.lbf_y_multiplier);
+-    println!("  솔버판정  CollisionTracker::get_total_loss (jagua CDE)");
+-    println!("  엄격판정  flat_layout_collision_counts (양방향 다각형)\n");
+-
+-    let mut failures = vec![];
+-    for mode in [
+-        LbfOrderMode::LargestFirst,
+-        LbfOrderMode::SmallestFirst,
+-        LbfOrderMode::MiddleOutLargeFirst,
+-        LbfOrderMode::MiddleOutSmallFirst,
+-        LbfOrderMode::ConcavityFirst,
+-        LbfOrderMode::SizeTimesConcavity,
+-    ] {
+-        for &seed in &seeds {
+-            let built = LBFBuilder::new(
+-                instance.clone(),
+-                Xoshiro256PlusPlus::seed_from_u64(seed),
+-                LBF_SAMPLE_CONFIG,
+-                c.lbf_x_multiplier,
+-                c.lbf_y_multiplier,
+-            )
+-            .with_order_mode(mode)
+-            .with_raster_config(c.lbf_raster)
+-            .construct();
+-
+-            let width = built.prob.strip_width();
+-            let placed = built.prob.layout.placed_items.len();
+-            let (exterior, pairs, other, first) = flat_layout_collision_counts(&built.prob.layout);
+-            let sep = Separator::new(
+-                instance.clone(),
+-                built.prob,
+-                Xoshiro256PlusPlus::seed_from_u64(seed + 1000),
+-                c.expl_cfg.separator_config,
+-            );
+-            let loss = sep.ct.get_total_loss();
+-
+-            let bad = loss != 0.0 || pairs != 0 || other != 0 || placed != n_items;
+-            println!(
+-                "  {:20} seed {seed}  폭 {width:9.2}  배치 {placed}/{n_items}  \
+-                 솔버손실 {loss:.4}  엄격[외곽 {exterior} / 조각쌍 {pairs} / 기타 {other}]{}",
+-                mode.label(),
+-                if bad { "  ◀ 문제" } else { "" }
+-            );
+-            if let Some((a, b)) = first {
+-                println!("  {:20}   첫 충돌 쌍: item {a} vs item {b}", "");
+-            }
+-            if bad {
+-                failures.push((mode.label(), seed, loss, pairs, other, placed));
+-            }
+-        }
+-    }
+-
+-    println!();
+-    if failures.is_empty() {
+-        println!("  모든 모드에서 겹침 없음 · 전량 배치.\n");
+-    } else {
+-        println!("  문제 있는 조합 {}건:", failures.len());
+-        for (label, seed, loss, pairs, other, placed) in &failures {
+-            println!(
+-                "    {label} seed {seed}: 손실 {loss:.4}, 조각쌍 {pairs}, 기타 {other}, 배치 {placed}/{n_items}"
+-            );
+-        }
+-        println!();
+-    }
+-    assert!(
+-        failures.is_empty(),
+-        "초기 해에 겹침이 있거나 조각을 다 놓지 못한 모드가 있다: {failures:?}"
+-    );
+-}
++//! LBF 배치 순서 모드별로 **초기 해가 실제로 겹침 없는지** 검증하는 하네스.
++//!
++//! # 왜 필요한가
++//!
++//! 순서 모드를 도입할 때는 폭·밀도만 쟀고 **실행 가능성은 재지 않았다**.
++//! LBF 는 후보를 CDE 로 검증하고 채택하므로 원리상 겹침이 없어야 하지만,
++//! 그건 검증이 아니라 가정이다. 여기서 두 오라클로 직접 확인한다:
++//!
++//! * `CollisionTracker::get_total_loss()` — 솔버가 쓰는 판정 (jagua CDE).
++//! * `flat_layout_collision_counts` — 인증기·콜백 진단이 쓰는 판정
++//!   (양방향 다각형 재검사).
++//!
++//! 배치 **수량**도 함께 본다. 겹침이 없어도 조각을 다 못 놓으면 그건 다른 결함이다.
++//!
++//! ```powershell
++//! $env:SWARM_INPUT='C:\Caplanet\AiWorks\InputData\여성WSjk_비교용-G_New_SwarmV1.json'
++//! cargo test -p swarm-core --release --features "simd,capmods,adaptive,structure-first" `
++//!   --test lbf_order_feasibility -- --ignored --nocapture --test-threads=1
++//! ```
++
++use jagua_rs::io::import::Importer;
++use jagua_rs::probs::spp::entities::SPInstance;
++use rand::SeedableRng;
++use rand::rngs::Xoshiro256PlusPlus;
++use swarm_core::config::DEFAULT_SWARM_CONFIG;
++use swarm_core::consts::LBF_SAMPLE_CONFIG;
++use swarm_core::eval::lbf_evaluator::flat_layout_collision_counts;
++use swarm_core::optimizer::lbf::{LBFBuilder, LbfOrderMode};
++use swarm_core::optimizer::separator::Separator;
++use swarm_core::util::io::read_spp_input;
++use std::path::{Path, PathBuf};
++
++fn input_path() -> PathBuf {
++    match std::env::var("SWARM_INPUT") {
++        Ok(p) => PathBuf::from(p),
++        Err(_) => Path::new(env!("CARGO_MANIFEST_DIR"))
++            .join("../data/input")
++            .join("wsjk156.json"),
++    }
++}
++
++fn load(path: &Path) -> SPInstance {
++    let (ext, _) = read_spp_input(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
++    let c = DEFAULT_SWARM_CONFIG;
++    let imp = Importer::new(
++        c.cde_config,
++        c.poly_simpl_tolerance,
++        c.min_item_separation,
++        c.narrow_concavity_cutoff_ratio,
++    );
++    jagua_rs::probs::spp::io::import_instance(&imp, &ext).expect("import")
++}
++
++#[test]
++#[ignore = "실측 하네스 — 여섯 모드를 모두 구성한다"]
++fn every_lbf_order_mode_produces_a_collision_free_initial_layout() {
++    let path = input_path();
++    let instance = load(&path);
++    let c = DEFAULT_SWARM_CONFIG;
++    let n_items = instance.total_item_qty();
++    let seeds: Vec<u64> = std::env::var("ORDER_SEEDS")
++        .unwrap_or_else(|_| "0,1,2".into())
++        .split(',')
++        .filter_map(|v| v.trim().parse().ok())
++        .collect();
++
++    println!("\n══════ LBF 배치 순서별 초기 해 실행 가능성 ══════");
++    println!("  입력    {}", path.display());
++    println!(
++        "  조각    {n_items}개 / seed {seeds:?} / lbf_x={} lbf_y={}",
++        c.lbf_x_multiplier, c.lbf_y_multiplier
++    );
++    println!("  솔버판정  CollisionTracker::get_total_loss (jagua CDE)");
++    println!("  엄격판정  flat_layout_collision_counts (양방향 다각형)\n");
++
++    let mut failures = vec![];
++    for mode in [
++        LbfOrderMode::LargestFirst,
++        LbfOrderMode::SmallestFirst,
++        LbfOrderMode::MiddleOutLargeFirst,
++        LbfOrderMode::MiddleOutSmallFirst,
++        LbfOrderMode::ConcavityFirst,
++        LbfOrderMode::SizeTimesConcavity,
++    ] {
++        for &seed in &seeds {
++            let built = LBFBuilder::new(
++                instance.clone(),
++                Xoshiro256PlusPlus::seed_from_u64(seed),
++                LBF_SAMPLE_CONFIG,
++                c.lbf_x_multiplier,
++                c.lbf_y_multiplier,
++            )
++            .with_order_mode(mode)
++            .with_raster_config(c.lbf_raster)
++            .construct();
++
++            let exact_error = swarm_core::structure::pipeline::solution_validation_error(
++                &instance,
++                &built.prob.save(),
++            );
++            assert!(
++                exact_error.is_none(),
++                "{} seed {seed}: {exact_error:?}",
++                mode.label()
++            );
++            let width = built.prob.strip_width();
++            let placed = built.prob.layout.placed_items.len();
++            let (exterior, pairs, other, first) = flat_layout_collision_counts(&built.prob.layout);
++            let sep = Separator::new(
++                instance.clone(),
++                built.prob,
++                Xoshiro256PlusPlus::seed_from_u64(seed + 1000),
++                c.expl_cfg.separator_config,
++            );
++            let loss = sep.ct.get_total_loss();
++
++            let bad = loss != 0.0 || pairs != 0 || other != 0 || placed != n_items;
++            println!(
++                "  {:20} seed {seed}  폭 {width:9.2}  배치 {placed}/{n_items}  \
++                 솔버손실 {loss:.4}  엄격[외곽 {exterior} / 조각쌍 {pairs} / 기타 {other}]{}",
++                mode.label(),
++                if bad { "  ◀ 문제" } else { "" }
++            );
++            if let Some((a, b)) = first {
++                println!("  {:20}   첫 충돌 쌍: item {a} vs item {b}", "");
++            }
++            if bad {
++                failures.push((mode.label(), seed, loss, pairs, other, placed));
++            }
++        }
++    }
++
++    println!();
++    if failures.is_empty() {
++        println!("  모든 모드에서 겹침 없음 · 전량 배치.\n");
++    } else {
++        println!("  문제 있는 조합 {}건:", failures.len());
++        for (label, seed, loss, pairs, other, placed) in &failures {
++            println!(
++                "    {label} seed {seed}: 손실 {loss:.4}, 조각쌍 {pairs}, 기타 {other}, 배치 {placed}/{n_items}"
++            );
++        }
++        println!();
++    }
++    assert!(
++        failures.is_empty(),
++        "초기 해에 겹침이 있거나 조각을 다 놓지 못한 모드가 있다: {failures:?}"
++    );
++}
+diff --git a/src/grouped_engine.rs b/src/grouped_engine.rs
+--- a/src/grouped_engine.rs
++++ b/src/grouped_engine.rs
+@@ -68,6 +68,7 @@
+     local_to_global: Vec<u64>,
+     place_groups: PlaceGroups,
+     frozen_ids: Vec<usize>,
++    frozen_reference: HashMap<usize, DTransformation>,
+     gap_after_mm: f32,
+     config: SwarmConfig,
+     force_single_worker: bool,
+@@ -589,6 +590,13 @@
+     /// symmetric authority used by Structure candidates. This final global
+     /// check also covers fixed-prefix/lane-offset integration.
+     pub fn export_certified_solution(&self) -> Result<ExtSPSolution, String> {
++        if self
++            .lanes
++            .iter()
++            .any(|lane| !lane.constraints_valid(&lane.solution))
++        {
++            return Err("public solution changed a frozen pose or rigid group".to_string());
++        }
+         let ext = self.export_solution();
+         if !ext.strip_width.is_finite() || ext.strip_width <= 0.0 {
+             return Err("merged public solution has an invalid strip width".to_string());
+@@ -1196,13 +1204,7 @@
+                 // hints are repaired during Init, but this guard keeps the
+                 // public callback contract safe if a future initializer adds
+                 // another hinted path.
+-                if crate::structure::pipeline::solution_validation_error_with_frozen_ids(
+-                    &lane.instance,
+-                    &lane.solution,
+-                    &lane.frozen_ids,
+-                )
+-                .is_none()
+-                {
++                if lane.candidate_is_valid(&lane.solution) {
+                     let report = match phase {
+                         LanePhase::Compression
+                         | LanePhase::Polish
+@@ -1488,6 +1490,37 @@
+ }
+ 
+ impl RegionLane {
++    fn constraints_valid(&self, solution: &SPSolution) -> bool {
++        if self.frozen_reference.is_empty() {
++            return self
++                .place_groups
++                .solution_preserves_relative_poses(solution);
++        }
++        let mut matched = 0;
++        for pi in solution.layout_snapshot.placed_items.values() {
++            if let Some(expected) = self.frozen_reference.get(&pi.item_id) {
++                if pi.d_transf != *expected {
++                    return false;
++                }
++                matched += 1;
++            }
++        }
++        matched == self.frozen_reference.len()
++            && self
++                .place_groups
++                .solution_preserves_relative_poses(solution)
++    }
++
++    fn candidate_is_valid(&self, solution: &SPSolution) -> bool {
++        self.constraints_valid(solution)
++            && crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                &self.instance,
++                solution,
++                &self.frozen_ids,
++            )
++            .is_none()
++    }
++
+     fn supports_structure_gap_repair(&self) -> bool {
+         self.place_groups.is_empty() && self.instance.total_item_qty() >= 4
+     }
+@@ -1683,7 +1716,8 @@
+                 &incumbent,
+                 &self.frozen_ids,
+             );
+-        let baseline_exact_valid = baseline_validation_error.is_none();
++        let baseline_exact_valid =
++            baseline_validation_error.is_none() && self.constraints_valid(&incumbent);
+         let incumbent_exact_valid = baseline_exact_valid;
+         let baseline_complete =
+             incumbent.layout_snapshot.placed_items.len() == self.instance.total_item_qty();
+@@ -1871,7 +1905,7 @@
+                 &candidate,
+                 &self.frozen_ids,
+             );
+-        let exact_valid = validation_error.is_none();
++        let exact_valid = validation_error.is_none() && self.constraints_valid(&candidate);
+         let complete = structure_hints
+             .as_ref()
+             .is_none_or(|stats| stats.start.completed);
+@@ -2023,12 +2057,7 @@
+         candidate: SPSolution,
+         stage: StructureStage,
+     ) -> (bool, bool) {
+-        let exact = crate::structure::pipeline::solution_validation_error_with_frozen_ids(
+-            &self.instance,
+-            &candidate,
+-            &self.frozen_ids,
+-        )
+-        .is_none();
++        let exact = self.candidate_is_valid(&candidate);
+         let mut improved = false;
+         if exact
+             && let Some(incumbent) = self.structure_incumbent.as_mut()
+@@ -2207,14 +2236,7 @@
+             );
+             if let Some(best) = resumed
+                 .iter()
+-                .filter(|solution| {
+-                    crate::structure::pipeline::solution_validation_error_with_frozen_ids(
+-                        &self.instance,
+-                        solution,
+-                        &self.frozen_ids,
+-                    )
+-                    .is_none()
+-                })
++                .filter(|solution| self.candidate_is_valid(solution))
+                 .min_by(|a, b| a.strip_width().total_cmp(&b.strip_width()))
+                 && best.strip_width() < candidate.strip_width()
+             {
+@@ -2295,13 +2317,7 @@
+                     sep.rollback(&snapped, Some(&snapshot));
+                     sep.refit_strip();
+                     let snapped_seed = sep.prob.save();
+-                    if crate::structure::pipeline::solution_validation_error_with_frozen_ids(
+-                        &self.instance,
+-                        &snapped_seed,
+-                        &self.frozen_ids,
+-                    )
+-                    .is_none()
+-                    {
++                    if self.candidate_is_valid(&snapped_seed) {
+                         polish_seed = snapped_seed;
+                     } else {
+                         sep = self.separator(self.config.cmpr_cfg.separator_config);
+@@ -2361,14 +2377,7 @@
+         );
+         let committed = solutions
+             .iter()
+-            .filter(|solution| {
+-                crate::structure::pipeline::solution_validation_error_with_frozen_ids(
+-                    &self.instance,
+-                    solution,
+-                    &self.frozen_ids,
+-                )
+-                .is_none()
+-            })
++            .filter(|solution| self.candidate_is_valid(solution))
+             .min_by(|a, b| a.strip_width().total_cmp(&b.strip_width()))
+             .cloned()
+             .unwrap_or(fallback);
+@@ -2401,13 +2410,7 @@
+             &config,
+         );
+         self.remember_tracker(LanePhase::Compression, &sep.ct);
+-        let committed = if crate::structure::pipeline::solution_validation_error_with_frozen_ids(
+-            &self.instance,
+-            &candidate,
+-            &self.frozen_ids,
+-        )
+-        .is_none()
+-        {
++        let committed = if self.candidate_is_valid(&candidate) {
+             candidate
+         } else {
+             log::warn!("[GROUPED:CMPR] rejected a non-exact lane candidate");
+@@ -2440,13 +2443,7 @@
+             &self.config.lp_solver,
+         );
+         self.remember_tracker(LanePhase::Polish, &sep.ct);
+-        let committed = if crate::structure::pipeline::solution_validation_error_with_frozen_ids(
+-            &self.instance,
+-            &candidate,
+-            &self.frozen_ids,
+-        )
+-        .is_none()
+-        {
++        let committed = if self.candidate_is_valid(&candidate) {
+             candidate
+         } else {
+             log::warn!("[GROUPED:PLSH] rejected a non-exact lane candidate");
+@@ -2802,7 +2799,15 @@
+         ));
+     }
+ 
++    let frozen_reference = solution
++        .layout_snapshot
++        .placed_items
++        .values()
++        .filter(|pi| frozen_ids.contains(&pi.item_id))
++        .map(|pi| (pi.item_id, pi.d_transf))
++        .collect();
+     Ok(RegionLane {
++        frozen_reference,
+         instance,
+         prob,
+         solution,
+@@ -4220,6 +4225,77 @@
+     }
+ 
+     #[test]
++    fn public_candidates_reject_lock_or_rigid_pose_drift_even_without_collisions() {
++        for frozen in [true, false] {
++            let json=serde_json::json!({"schema_version":2,
++                "nesting":{"mode":"all_items","group_workers":1,"quantum_ms":1,"locked_prefix_gap_mm":0.0},
++                "instance":{"name":"constraint-drift","strip_height":30.0,"items":[rectangle(0,frozen,0.01),rectangle(1,false,12.01)]},
++                "regions":[],"place_groups":if frozen {serde_json::json!([])} else {serde_json::json!([{"id":7,"member_item_ids":[0,1]}])}}).to_string();
++            let mut engine =
++                GroupedStepState::new(parse_and_validate(&json).unwrap(), fast_structure_config())
++                    .unwrap();
++            let baseline = engine.lanes[0].solution.clone();
++            if !frozen {
++                let mut rigid = baseline.clone();
++                let delta = DTransformation::new(0.37, (4.0, 3.0)).compose();
++                for pi in rigid.layout_snapshot.placed_items.values_mut() {
++                    pi.d_transf = pi.d_transf.compose().transform(&delta).decompose();
++                }
++                assert!(
++                    engine.lanes[0].constraints_valid(&rigid),
++                    "a common rigid delta must remain allowed"
++                );
++                let first = rigid
++                    .layout_snapshot
++                    .placed_items
++                    .values_mut()
++                    .next()
++                    .unwrap();
++                first.d_transf = DTransformation::new(f32::INFINITY, (0.0, 0.0));
++                assert!(
++                    !engine.lanes[0].constraints_valid(&rigid),
++                    "nonfinite poses must be rejected without matrix panics"
++                );
++            }
++            let mut drifted = baseline.clone();
++            let p = drifted
++                .layout_snapshot
++                .placed_items
++                .values_mut()
++                .find(|p| p.item_id == 0)
++                .unwrap();
++            let (x, y) = p.d_transf.translation();
++            p.d_transf = DTransformation::new(p.d_transf.rotation(), (x + 1.0, y));
++            assert!(solution_validation_error(&engine.lanes[0].instance, &drifted).is_none());
++            engine.lanes[0].solution = drifted.clone();
++            assert!(
++                engine.export_certified_solution().is_err(),
++                "frozen={frozen}: drifted pose exported"
++            );
++            let lane = &mut engine.lanes[0];
++            lane.solution = baseline.clone();
++            lane.structure_incumbent = Some(baseline.clone());
++            let (exact, improved) =
++                lane.apply_structure_candidate(drifted, StructureStage::P4Refine);
++            assert!(!exact && !improved);
++            assert_eq!(
++                lane.solution
++                    .layout_snapshot
++                    .placed_items
++                    .values()
++                    .map(|p| p.d_transf)
++                    .collect::<Vec<_>>(),
++                baseline
++                    .layout_snapshot
++                    .placed_items
++                    .values()
++                    .map(|p| p.d_transf)
++                    .collect::<Vec<_>>()
++            );
++        }
++    }
++
++    #[test]
+     fn structure_candidate_rejects_invalid_geometry_and_restores_exact_incumbent() {
+         let json = serde_json::json!({
+             "schema_version":2,

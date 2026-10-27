@@ -1,0 +1,102 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <Version>0.1.0.006</Version>
+    <Platforms>AnyCPU;x64</Platforms>
+    <ApplicationIcon>Resources\swarm_wpf.ico</ApplicationIcon>
+    <!-- WPF Debug/Release 모두 검증된 release cdylib를 기본 사용한다.
+         개발용 프로필이 필요하면 -p:SwarmNativeProfile=dev-fast 로 명시한다. -->
+    <SwarmNativeProfile Condition="'$(SwarmNativeProfile)' == ''">release</SwarmNativeProfile>
+    <SwarmNativeDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\target\$(SwarmNativeProfile)'))</SwarmNativeDirectory>
+    <SwarmNativeDll>$(SwarmNativeDirectory)\cpswcore.dll</SwarmNativeDll>
+    <SwarmNativePdb>$(SwarmNativeDirectory)\cpswcore.pdb</SwarmNativePdb>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+    <DefineConstants>$(DefineConstants);DIRECT;FREEZE</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <DefineConstants>$(DefineConstants);DIRECT;FREEZE</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+    <DefineConstants>$(DefineConstants);DIRECT;FREEZE</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <DefineConstants>$(DefineConstants);DIRECT;FREEZE</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="Natives\**" />
+    <EmbeddedResource Remove="Natives\**" />
+    <None Remove="Natives\**" />
+    <Page Remove="Natives\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ActiproSoftware.Controls.WPF" Version="25.1.4" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Xaml.Behaviors.Wpf" Version="1.1.142" />
+    <PackageReference Include="ReactiveUI.SourceGenerators" Version="3.2.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="ReactiveUI.Validation" Version="7.1.0" />
+    <PackageReference Include="ReactiveUI.WPF" Version="24.1.0" />
+    <PackageReference Include="ReactiveValidation.Wpf" Version="2.0.3" />
+    <PackageReference Include="SkiaSharp.Views.WPF" Version="4.151.1" />
+    <PackageReference Include="Svg.Skia" Version="5.2.1" />
+    <PackageReference Include="System.Reactive" Version="7.0.0" />
+  </ItemGroup>
+
+	<!-- C# P/Invoke -->
+	<ItemGroup>
+		<Compile Include="..\Natives\SwarmNative.cs" Link="Natives\SwarmNative.cs" />
+		<Compile Include="..\Natives\SwarmOptimizer.cs" Link="Natives\SwarmOptimizer.cs" />
+	</ItemGroup>
+	<ItemGroup>
+	  <Content Include="Resources\swarm_wpf.ico" />
+	</ItemGroup>
+	<ItemGroup>
+	  <!-- Always copy from Cargo output so an older bin/publish DLL cannot survive silently. -->
+	  <Content Include="$(SwarmNativeDll)" Link="cpswcore.dll">
+	    <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+	    <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+	    <TargetPath>cpswcore.dll</TargetPath>
+	    <Visible>false</Visible>
+	  </Content>
+	  <Content Include="$(SwarmNativePdb)" Link="cpswcore.pdb" Condition="Exists('$(SwarmNativePdb)')">
+	    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	    <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+	    <TargetPath>cpswcore.pdb</TargetPath>
+	    <Visible>false</Visible>
+	  </Content>
+	</ItemGroup>
+	<ItemGroup>
+	  <Compile Update="Resources\TooltipResources.Designer.cs">
+	    <DesignTime>True</DesignTime>
+	    <AutoGen>True</AutoGen>
+	    <DependentUpon>TooltipResources.resx</DependentUpon>
+	  </Compile>
+	</ItemGroup>
+	<ItemGroup>
+	  <EmbeddedResource Update="Resources\TooltipResources.resx">
+	    <Generator>PublicResXFileCodeGenerator</Generator>
+	    <LastGenOutput>TooltipResources.Designer.cs</LastGenOutput>
+	  </EmbeddedResource>
+	</ItemGroup>
+
+	<Target Name="ValidateSwarmNativeLibrary" BeforeTargets="PrepareForBuild;ComputeFilesToPublish">
+	  <Error Condition="!Exists('$(SwarmNativeDll)')"
+	         Text="Required native library was not found: $(SwarmNativeDll). Build Rust first with: cargo build --release --features &quot;simd,capmods,adaptive,structure-first,jni&quot;" />
+	</Target>
+
+</Project>

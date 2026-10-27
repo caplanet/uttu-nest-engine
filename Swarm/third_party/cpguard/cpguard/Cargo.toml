@@ -1,0 +1,34 @@
+[package]
+name = "cpguard"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Reusable compile-time code protection for Rust: a micro-VM for critical routines, control-flow obfuscation, and string encryption."
+repository = "https://github.com/mwlee-caplanet/DeCompileDefense"
+license = "MIT OR Apache-2.0"
+keywords = ["obfuscation", "anti-reverse", "protection", "vm", "hardening"]
+categories = ["development-tools", "no-std"]
+
+[features]
+default = ["std"]
+# std 를 끄면(`default-features = false`) alloc 만으로 동작(no_std).
+std = []
+# 런타임 안티탬퍼 탐지(후킹/인젝션). std 필요. 실제 탐지는 Windows 전용(#[cfg(windows)]),
+# 비해당 플랫폼에서는 clean 을 반환한다. 기본 off.
+antitamper = ["std", "dep:windows-sys"]
+# 탐지 결과를 호스트 콜백으로 보고(크래시 없음). 기본 off. antitamper 를 포함.
+telemetry = ["antitamper"]
+# 점진적 품질 저하 "신호"(앱이 자기 품질 knob 에 섞을 값). 오탐 시 정상 사용자 피해(양날). 기본 off.
+degrade = ["antitamper"]
+
+[dependencies]
+cpguard-macros = { path = "../cpguard-macros", version = "0.2.0" }
+# no_std 에서 f64::sqrt 대체(IEEE 정확 반올림이라 하드웨어 sqrt 와 비트 동일). std 빌드는 미사용.
+libm = "0.2.11"
+# 안티탬퍼 전용(optional). windows 외 타깃에서는 빈 크레이트로 컴파일된다.
+windows-sys = { version = "0.59.0", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_LibraryLoader",
+] }

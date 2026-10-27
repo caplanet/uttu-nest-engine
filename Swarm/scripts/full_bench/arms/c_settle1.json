@@ -1,0 +1,1 @@
+{"_note":"미세 래스터 + 매 조각 다지기 (hole fill + LP)","lbf_raster.cell_ratio":0.02,"lbf_raster.max_cells":4000000,"lbf_raster.n_random_samples":4000,"constructor.settle_every":1,"constructor.settle_budget_ms":150}

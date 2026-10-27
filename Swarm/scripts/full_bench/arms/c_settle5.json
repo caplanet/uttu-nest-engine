@@ -1,0 +1,1 @@
+{"_note":"미세 래스터 + 5조각마다 다지기","lbf_raster.cell_ratio":0.02,"lbf_raster.max_cells":4000000,"lbf_raster.n_random_samples":4000,"constructor.settle_every":5,"constructor.settle_budget_ms":300}

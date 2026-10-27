@@ -1,0 +1,192 @@
+{
+  "workspace": "C:\\Caplanet\\AiWorks\\AdaptiveAlgorithm2",
+  "captured_at": "2026-09-07T08:53:46.596990+00:00",
+  "baseline": "SWARM_REVIEW_SOURCE_HASHES_2026-09-07.json",
+  "features": [
+    "simd",
+    "capmods",
+    "adaptive",
+    "structure-first"
+  ],
+  "changed_files": [
+    {
+      "path": "csharp/CAPlanetSwarmSample.WPF/Views/WorkspaceViewModel.cs",
+      "before_sha256": "c4576125bd70807f9d3544265259c46f17dea3a552cf638e88ca884e110912ac",
+      "after_sha256": "a5ea52915a84ffbc6385a4f404e9316b772770c71c17473b67acbacc0f44760b"
+    },
+    {
+      "path": "csharp/Natives/SwarmNative.cs",
+      "before_sha256": "ee7aa05b6a37089fa82b84c1fe9466b257784ceca8b8367ceaae7ad2cbbf6980",
+      "after_sha256": "df8378f213fc6f1006820ec086ad8d33a18c388c8c9e8640d3cb30707710f22f"
+    },
+    {
+      "path": "csharp/Natives/SwarmOptimizer.cs",
+      "before_sha256": "af135644fa230a4eb895c00e9c50d7056142e1703411b9bac1c9ac7bd759ff53",
+      "after_sha256": "1e4e5a716eb7a2a49d63847d0ec004a30a3fe3c15113110a14a7f73ee1de208b"
+    },
+    {
+      "path": "include/swarm.h",
+      "before_sha256": "9f6146be03ed6cacb93247b1964f63befee6f536eae21f1c193d4946e48869f1",
+      "after_sha256": "d914282f9269eb37ba8b7f608ce71c5be44c615cc2e01cd8675843376c397b6f"
+    },
+    {
+      "path": "swarm-core/src/config.rs",
+      "before_sha256": "502b3423671946b931063324c033f62760f5b5faf7b5b9b474061c6cd313565d",
+      "after_sha256": "38b108241285fd8671cdede421955b7cebb37d5cb17f367bfff65e1cc8d19661"
+    },
+    {
+      "path": "swarm-core/src/escape/pipeline.rs",
+      "before_sha256": "3d0cfc6f43b98b64d7f8ea5c7b48f7b328e2390e30f524ee0a2f5b6164ce3c2f",
+      "after_sha256": "a90156d5b48c70295cba69490f26bbd8a6b346daa60750740ac5402f7f26446e"
+    },
+    {
+      "path": "swarm-core/src/lp_solver/microlp_backend.rs",
+      "before_sha256": "6cf4a9190153b6cc2524e9ba7b31382cff610e67a46694e9d9b7d00aa2a7ba54",
+      "after_sha256": "a9b55f73e0ed14d9211ffb24e5923a775e85576cabc0fd470f2ca53bf0f1a187"
+    },
+    {
+      "path": "swarm-core/src/lp_solver/mod.rs",
+      "before_sha256": "f54469209c467abffef9c4589b5aec2ba30fa67c67d1bfb8a23501e61bae39dd",
+      "after_sha256": "829988844559413c52cdc88d402ae8d42c2acd34934659d5af8d82ef546a0bf7"
+    },
+    {
+      "path": "swarm-core/src/nfp_lbf/cache.rs",
+      "before_sha256": "0c6771af5523a246cb24653cae1a5894e777bcdf2fd25d06ad54eb023ff8af12",
+      "after_sha256": "e79b4edb0850c8c88d3131629cf8289505c5cec6330369b7187311b074b221c4"
+    },
+    {
+      "path": "swarm-core/src/nfp_lbf/exploration.rs",
+      "before_sha256": "101e6eb81d516ecdea72abf52ff153ee708fe449ec9981cb6cce00661b7b91e6",
+      "after_sha256": "0c18f4473cf28ea7d2ba5426383f0544d4219dc7f7708d9bd0767082de132cb1"
+    },
+    {
+      "path": "swarm-core/src/optimizer/compress.rs",
+      "before_sha256": "e01ad5962b9bc0bd0fca6329cb901e185d59fc2f28223943ed09d497d1bdab94",
+      "after_sha256": "f2ef95726c005d64e0cad640069ec09e9d056e1c1df93f2c2051f7d08e5fefde"
+    },
+    {
+      "path": "swarm-core/src/optimizer/explore.rs",
+      "before_sha256": "fcdf02316d24d01e11c2b44eb388ac53efae2a664363e8e3104d02cb3af42d30",
+      "after_sha256": "08254129de9600c021622670335255e4c338e193a72216c5eab5096d952aa1a6"
+    },
+    {
+      "path": "swarm-core/src/optimizer/explore_mods.rs",
+      "before_sha256": "8b970d73cfb31bc16a1efc9ee0bfe42d57622a5f50e9e4f5b9d664e1a18ee787",
+      "after_sha256": "a70802f19156fd41a5e19ddcbd75e833a657378077077c8a4408bbf529cde608"
+    },
+    {
+      "path": "swarm-core/src/optimizer/lns.rs",
+      "before_sha256": "a2141ff58bf00928d22e8f1dbf0c58e7eb78a74407b10f15be46f6e985b634a7",
+      "after_sha256": "05c14615d5e0368c8d0cd52272ad52276b4e88dbf281a398a91531091c9a0b7b"
+    },
+    {
+      "path": "swarm-core/src/optimizer/mod.rs",
+      "before_sha256": "0c1ef30c5f4ba9e8493b8c455848785cc7b918af9c0e8b3d77152b21e7e45956",
+      "after_sha256": "a15527261386676b2519d93a68d708d024505cc4074b6f069c6c119352c0a28f"
+    },
+    {
+      "path": "swarm-core/src/optimizer/polish/holes.rs",
+      "before_sha256": "7e089a4c9abf569e8f203ac8bb73911b73aaa3325085f839101700058659bff4",
+      "after_sha256": "2489c125f434f3f68bd580dc99d4cfa380ff1b4627662f9897b65bff453d762e"
+    },
+    {
+      "path": "swarm-core/src/optimizer/polish/lp.rs",
+      "before_sha256": "7d08f3cb382a0e57562c506c186f0d19b4998f4f470f159ce6cc71c5a71a8324",
+      "after_sha256": "8229728b740fe86df3ac5dee775f4a45a42d5ed0c946a213132d6ba462900296"
+    },
+    {
+      "path": "swarm-core/src/optimizer/polish/mod.rs",
+      "before_sha256": "280e78d3410b930879417e84f3dc9789f96d41942af2f4681ddd68eb6ea83c16",
+      "after_sha256": "4d99dc24c3f1a71c961b0b55a64bf9d64d2d596f20df78a7a0be10fa24c0d911"
+    },
+    {
+      "path": "swarm-core/src/optimizer/polish/probe.rs",
+      "before_sha256": "35f7b8d735a8a34f6696d71af88d50cc1e69dcc8b328952b61ec7465e6bb08ef",
+      "after_sha256": "0b7418004159b253f5e2f3dc3786f6ace01b846b796eef42be3109f701016d90"
+    },
+    {
+      "path": "swarm-core/src/optimizer/polish/slide.rs",
+      "before_sha256": "98d6c38d3a92ff35023ec55c4cd81a15f3cbe49d94a9f995e55a5cc0a377f4a8",
+      "after_sha256": "d7c50423225915ff58c4c691153d81f96ad492c5b1eed163a6fa8973bf1bd825"
+    },
+    {
+      "path": "swarm-core/src/optimizer/reclaim.rs",
+      "before_sha256": "aec145ac530f16e5fb6933c413d23827d4cc9ce543204cfcf852f58e6ac9412d",
+      "after_sha256": "3e6d3015602f8949e809c5393b6d7f696100a19f3c1502432d8a9291ab19f8e6"
+    },
+    {
+      "path": "swarm-core/src/optimizer/separator.rs",
+      "before_sha256": "1e72ef065e963157bb5abe578ba56be229e43b4c25582c16dd31012d0b13c984",
+      "after_sha256": "db8b0a1151d398693398285c84da46fad263aab929cbaf97ee79991e499c601d"
+    },
+    {
+      "path": "swarm-core/src/optimizer/worker.rs",
+      "before_sha256": "6a291e57c93616341eda52a03f2832072a262580be50efd68640cd20307ccf9f",
+      "after_sha256": "10881b083405247b67d039f93547e308b5a9534a3e87946a398e3d4f33ac07b6"
+    },
+    {
+      "path": "swarm-core/src/sample/coord_descent.rs",
+      "before_sha256": "747ba504cdb1e77d0aba4e031fceb10c01359ddf73e987e5de977f91be8ec451",
+      "after_sha256": "63a6e5f617c6bff8c07434f44c0db8161180a93a4905e913fc9b7173ee26e01e"
+    },
+    {
+      "path": "swarm-core/src/sample/nfp_sampler.rs",
+      "before_sha256": "e48041d1cb98e4b71dac536b1c49f7921feef937e01f23f14319375dbc416900",
+      "after_sha256": "9300185aa611b3d800c0d1630f105315bde8ed77a20ebe4827346dbe03dca02b"
+    },
+    {
+      "path": "swarm-core/src/sample/search.rs",
+      "before_sha256": "8b62e3726a2afdc7d8bae50151f108421eb059ed9cbfa8dfd676b51b046c7122",
+      "after_sha256": "341391d01eaf8de92e1972ae6b957b88ba1eedbc0a7d054a6c2d5aca1a150ef8"
+    },
+    {
+      "path": "swarm-core/src/util/assertions.rs",
+      "before_sha256": "dc24bacb473cc93c2165f254dd5c4507c9659c7371455834193736377a464bc0",
+      "after_sha256": "5931b16690925cfe4e29fba5a21d2cc25880f2c69c77a06c6fa94d7f03f849b1"
+    },
+    {
+      "path": "swarm-core/tests/stop_latency.rs",
+      "before_sha256": "729914d52f302bf62a97fe29af0375cf8c35cf834087ee24a519983721356bed",
+      "after_sha256": "8f7896d4328d5da2cef94556aca8367e8f0481cfa5b005b7773ffe739050d168"
+    },
+    {
+      "path": "src/ffi_step.rs",
+      "before_sha256": "a6ae5b28bf09d9ea6f5f2dd4f94724907b989723cf9bf747c2d5a97b86b867cb",
+      "after_sha256": "832d9abbbbcee3ffc0889cbd5a91d1f937eef1b493fd5e697aa8000ee2d68859"
+    },
+    {
+      "path": "src/grouped_engine.rs",
+      "before_sha256": "e67733691bd89045c58fd2cd2469dd97b414cae1cb10f25a56e4dff99b597bc0",
+      "after_sha256": "e7f06786e6032703a95414c993d77fcbe15535358da5a9849774fa3e4a1181de"
+    },
+    {
+      "path": "swarm-core/tests/parallel_optimization.rs",
+      "before_sha256": null,
+      "after_sha256": "3b58d1de8c4e6aeffc39c37f54e10b21c4f51f91e11ab245d549d79cbd04fad1"
+    }
+  ],
+  "abi": {
+    "abi_version": 15,
+    "swarm_config_size": 776,
+    "structure_config_size": 116,
+    "feature_flags": 15
+  },
+  "added_exports": [
+    "swarm_set_handle_shrink_step",
+    "swarm_clear_handle_shrink_step",
+    "swarm_get_handle_shrink_step"
+  ],
+  "release_dll": {
+    "path": "C:\\Caplanet\\AiWorks\\AdaptiveAlgorithm2\\target\\release\\capswarmcore_100.dll",
+    "sha256": "a403a78ba00864339e68b077851f9f47744bc5eae644f7eccf47ab8af670c230",
+    "bytes": 6264320
+  },
+  "verified_identical_copies": [
+    "C:\\Caplanet\\AiWorks\\AdaptiveAlgorithm2\\csharp\\CAPlanetSwarmSample.WPF\\bin\\Release\\net10.0-windows10.0.19041.0\\capswarmcore_100.dll",
+    "C:\\Caplanet\\AiWorks\\AdaptiveAlgorithm2\\target\\swarm-native-smoke\\bin\\Release\\net10.0\\capswarmcore_100.dll"
+  ],
+  "additional_regression_probe": {
+    "path": "docs/swarm_review_frozen_probe.rs",
+    "sha256": "ac0831869d6e9bddddfbb21936ebd71f62164578f21894033ca3b09a19e03564"
+  }
+}

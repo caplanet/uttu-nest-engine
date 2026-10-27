@@ -1,0 +1,149 @@
+{
+  "scope": "Three separator calls with default shrink and rollback; input import and LBF excluded; not a complete Explore benchmark",
+  "config": "DEFAULT_SWARM_CONFIG unchanged",
+  "features": [
+    "simd",
+    "capmods",
+    "adaptive",
+    "structure-first"
+  ],
+  "seeds": [
+    17,
+    42,
+    83
+  ],
+  "repetitions": 3,
+  "statistic": "median milliseconds per input/seed, alternating before/after order",
+  "inputs": [
+    {
+      "path": "data/input/fu.json",
+      "sha256": "b27782ece0ae71db192875f9e1d4c3ae60e32910f302f946c118347ded9d7b27"
+    },
+    {
+      "path": "data/input/wsjk156.json",
+      "sha256": "9a9afd4646b1dbfb8bf5b8215ae874538f240c0e035cb50d4ef795f68da6648a"
+    }
+  ],
+  "results": [
+    {
+      "file": "data/input/fu.json",
+      "seed": 17,
+      "identical": true,
+      "before_ms": 9.4496,
+      "after_ms": 8.5961,
+      "reduction_percent": 9.0321283440569,
+      "before_runs": [
+        9.3691,
+        9.4496,
+        10.862
+      ],
+      "after_runs": [
+        9.3808,
+        8.065199999999999,
+        8.5961
+      ],
+      "independent_validation_error": null,
+      "native_cde_feasible": true
+    },
+    {
+      "file": "data/input/fu.json",
+      "seed": 42,
+      "identical": true,
+      "before_ms": 19.6139,
+      "after_ms": 16.190800000000003,
+      "reduction_percent": 17.452418947787017,
+      "before_runs": [
+        18.573800000000002,
+        19.6139,
+        22.554399999999998
+      ],
+      "after_runs": [
+        16.475900000000003,
+        15.943100000000001,
+        16.190800000000003
+      ],
+      "independent_validation_error": null,
+      "native_cde_feasible": true
+    },
+    {
+      "file": "data/input/fu.json",
+      "seed": 83,
+      "identical": true,
+      "before_ms": 12.072899999999999,
+      "after_ms": 11.5919,
+      "reduction_percent": 3.984129745131648,
+      "before_runs": [
+        11.0777,
+        12.072899999999999,
+        12.6244
+      ],
+      "after_runs": [
+        11.5919,
+        11.275,
+        14.735800000000001
+      ],
+      "independent_validation_error": null,
+      "native_cde_feasible": true
+    },
+    {
+      "file": "data/input/wsjk156.json",
+      "seed": 17,
+      "identical": true,
+      "before_ms": 1306.7464,
+      "after_ms": 1136.4525999999998,
+      "reduction_percent": 13.031893564045793,
+      "before_runs": [
+        1262.4889,
+        1306.7464,
+        1313.4406000000001
+      ],
+      "after_runs": [
+        1118.3387,
+        1136.4525999999998,
+        1165.0626
+      ],
+      "independent_validation_error": null,
+      "native_cde_feasible": true
+    },
+    {
+      "file": "data/input/wsjk156.json",
+      "seed": 42,
+      "identical": true,
+      "before_ms": 191.7558,
+      "after_ms": 167.7006,
+      "reduction_percent": 12.544705297049674,
+      "before_runs": [
+        172.4317,
+        204.8399,
+        191.7558
+      ],
+      "after_runs": [
+        181.3066,
+        167.2023,
+        167.7006
+      ],
+      "independent_validation_error": null,
+      "native_cde_feasible": true
+    },
+    {
+      "file": "data/input/wsjk156.json",
+      "seed": 83,
+      "identical": true,
+      "before_ms": 673.928,
+      "after_ms": 596.6740000000001,
+      "reduction_percent": 11.463242364169457,
+      "before_runs": [
+        653.111,
+        673.928,
+        675.6265999999999
+      ],
+      "after_runs": [
+        587.1532000000001,
+        596.6740000000001,
+        606.7334
+      ],
+      "independent_validation_error": null,
+      "native_cde_feasible": false
+    }
+  ]
+}

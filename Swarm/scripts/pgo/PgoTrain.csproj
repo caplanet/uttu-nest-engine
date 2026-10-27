@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Reuse this checkout's ABI declarations instead of duplicating field offsets. -->
+    <Compile Include="../../csharp/Natives/SwarmNative.cs" Link="SwarmNative.cs" />
+  </ItemGroup>
+</Project>

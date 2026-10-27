@@ -1,0 +1,1 @@
+{"_note":"iter_no_imprv_limit 200 은 capmods 하한 max(200,156*5/2)=390 에 덮인다. 650 이어야 노브가 산다","exploration.separator.iter_no_imprv_limit":650}

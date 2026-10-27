@@ -1,0 +1,1 @@
+{"_note":"NFP-LBF + 가중합 우선 + 낭비 가중치 1.0","nfp_lbf.enabled":1,"nfp_lbf.n_orderings":20,"nfp_lbf.total_budget_ms":15000,"nfp_lbf.cache_budget_ms":5000,"constructor.nfp_score_first":1,"constructor.nfp_w2_waste":1.0}

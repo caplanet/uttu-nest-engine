@@ -1,0 +1,1 @@
+{"_note":"미세 래스터 + 구성 직후 한 번만 다지기 10초","lbf_raster.cell_ratio":0.02,"lbf_raster.max_cells":4000000,"lbf_raster.n_random_samples":4000,"constructor.post_init_compaction_ms":10000}

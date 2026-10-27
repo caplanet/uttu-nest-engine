@@ -1,0 +1,107 @@
+# 하드닝: profile.release 의 trim-paths 를 쓰기 위한 nightly opt-in (이 툴체인은 nightly 고정).
+cargo-features = ["trim-paths"]
+
+[workspace]
+members = ["swarm-core", "swarm-nfp", "swarm-wasm", "nesting-engine"]
+resolver = "3"
+
+[package]
+name = "swarm"
+version = "1.0.3"
+edition = "2024"
+description = "2D nesting and packing product by CA Planet Co., Ltd."
+
+# --- CA Planet Internal Rust Library, Dynamic/Static Linking Library ---
+[lib]
+name = "cpswcore"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+jagua-rs = { features = ["spp"], path = "third_party/jagua-rs" }
+#jagua-rs = { features = ["spp"], git = "https://github.com/JeroenGar/jagua-rs.git", rev = "06b4915aac55c944d966aaf5c6b472a7fd699c6e"}
+#jagua-rs = { features = ["spp"], path = "../jagua-rs/jagua-rs" }
+rand = "0.10"
+swarm-core = { path = "swarm-core" }
+rand_distr = "0.6"
+svg = "0.18"
+itertools = "0.15"
+# 하드닝(디컴파일 방지): release 빌드에서 모든 log 매크로를 컴파일 아웃한다.
+# release 는 debug_assertions=off 이므로 release_max_level_off 가 적용되어
+# [STRUCT:P1] 등 알고리즘 로그 문자열(C-7)·swarm_core:: 모듈명(C-4)·로그발 소스경로(C-1)가 전부 사라진다.
+# dev/debug 빌드(debug_assertions=on)에서는 이 설정이 무시되어 로깅이 그대로 동작한다(진단용).
+log = { version = "0.4", features = ["release_max_level_off"] }
+fern = "0.7"
+serde = "1.0"
+serde_json = "1.0"
+tap = "1.0"
+slotmap = "1.0"
+float-cmp = "0.10"
+ordered-float = "5.0"
+rayon = "1.10"
+num_cpus = "1.17"
+jiff = "0.2"
+test-case = "3.3"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+jni = { version = "0.21", optional = true }
+
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ctrlc = "3.5"
+
+[features]
+cpguard-policy-off = ["swarm-core/cpguard-policy-off"] # A/B baseline: keep seed VM, disable the six policy wrappers
+init-profile = ["swarm-core/init-profile"] # opt-in local Init diagnostics
+simd = ["swarm-core/simd"]
+# --- CA Planet JNI, CAPMODS ---
+jni = ["dep:jni"]   # JNI(Java/Kotlin) bindings; C# via cdylib needs no feature
+capmods = ["swarm-core/capmods"]         # enable custom algorithm variants (swap hook, raster NFP, left bias, ...)
+adaptive = ["swarm-core/adaptive"]       # use the adaptive exploration phase (optimizer/explore_mods.rs) instead of upstream's
+structure-first = ["swarm-core/structure-first"] # experimental P0-P5 structure-first pipeline
+antitamper = ["swarm-core/antitamper"]            # 런타임 후킹/인젝션 탐지 + 호스트 텔레메트리(기본 off)
+antitamper-degrade = ["swarm-core/antitamper-degrade"] # + 점진 저하 신호(양날, 기본 off)
+
+[build-dependencies]
+winres = "0.1"
+
+# microlp: 정지 응답을 위해 데드라인 검사 간격을 1000 → 32 pivot 으로 낮춘 사본
+# (third_party/microlp/src/solver.rs 참조). 그 외는 crates.io 0.6.0 과 동일하다.
+[patch.crates-io]
+microlp = { path = "third_party/microlp" }
+
+[profile.dev]
+overflow-checks = true
+
+[profile.debug-release]
+inherits = "release"
+debug-assertions = false
+debug = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# --- 디컴파일 방지 하드닝 ---
+# C-1,C-2,C-8: file!() 소스경로 + .cargo/.rustup 경로 + 빌드PC 사용자명(mwlee)을 전부 remap/제거
+trim-paths = "all"
+# C-3: 심볼/디버그 섹션 제거(PDB 비생성은 .cargo/config.toml 의 /DEBUG:NONE 과 병행)
+strip = "symbols"
+debug = false
+
+[profile.init-profile]
+inherits = "release"
+# 주의: panic = "abort" 는 적용하지 않는다. FFI 계층이 catch_unwind 로 패닉을 잡아
+#       에러코드로 변환하는 설계라, abort 로 바꾸면 호스트/JVM 이 크래시한다.
+
+[profile.test]
+opt-level = 3
+debug-assertions = true
+overflow-checks = true
+debug = true
+
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 2
+debug-assertions = false
+debug = true

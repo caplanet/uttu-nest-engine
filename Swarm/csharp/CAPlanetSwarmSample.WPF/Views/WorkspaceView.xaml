@@ -1,0 +1,432 @@
+﻿<UserControl x:Class="CAPlanetSwarmSample.WPF.Views.WorkspaceView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+             xmlns:themes="http://schemas.actiprosoftware.com/winfx/xaml/themes"
+             xmlns:sys="clr-namespace:System;assembly=mscorlib"
+             xmlns:skia="clr-namespace:SkiaSharp.Views.WPF;assembly=SkiaSharp.Views.WPF"
+             xmlns:shared="http://schemas.actiprosoftware.com/winfx/xaml/shared"
+             xmlns:local="clr-namespace:CAPlanetSwarmSample.WPF.Views"
+             xmlns:local_root="clr-namespace:CAPlanetSwarmSample.WPF"
+             mc:Ignorable="d" 
+             d:DataContext="{d:DesignInstance local:WorkspaceViewModel}"
+             themes:ThemeManager.DesignModeAreNativeThemesEnabled="True"
+             themes:ThemeManager.DesignModeTheme="Dark"
+             d:DesignHeight="450" d:DesignWidth="800">
+    <UserControl.Resources>
+        <ObjectDataProvider x:Key="OptimizerOptions" MethodName="GetValues"
+                            ObjectType="{x:Type sys:Enum}">
+            <ObjectDataProvider.MethodParameters>
+                <x:Type TypeName="local_root:OptimizerOptions" />
+            </ObjectDataProvider.MethodParameters>
+        </ObjectDataProvider>
+
+        <Style x:Key="RunButton" TargetType="Button">
+            <Setter Property="Background" Value="{DynamicResource {x:Static themes:AssetResourceKeys.ColorPaletteBlueBackgroundMidBrushKey}}"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="4" Padding="6,2">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource {x:Static themes:AssetResourceKeys.ColorPaletteBlueBackgroundMidHighBrushKey}}"/>
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource {x:Static themes:AssetResourceKeys.ColorPaletteBlueBackgroundMidLowBrushKey}}"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#555"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="StopButton" TargetType="Button">
+            <Setter Property="Background" Value="{DynamicResource {x:Static themes:AssetResourceKeys.ColorPaletteRedBackgroundMidBrushKey}}"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="4" Padding="6,2">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource {x:Static themes:AssetResourceKeys.ColorPaletteRedBackgroundMidHighBrushKey}}"/>
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource {x:Static themes:AssetResourceKeys.ColorPaletteRedBackgroundMidLowBrushKey}}"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#2a2a3a"/>
+                    <Setter Property="Foreground" Value="#666"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="GeneralButton" TargetType="Button">
+            <Setter Property="Background" Value="{DynamicResource {x:Static themes:AssetResourceKeys.ColorPaletteBlueBackgroundMidBrushKey}}"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="4" Padding="8,4">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource {x:Static themes:AssetResourceKeys.ColorPaletteBlueBackgroundMidHighBrushKey}}"/>
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource {x:Static themes:AssetResourceKeys.ColorPaletteBlueBackgroundMidLowBrushKey}}"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#555"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </UserControl.Resources>
+
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="{Binding LeftPanelWidth}" MinWidth="{Binding LeftPanelMinWidth}"/>
+            <ColumnDefinition Width="{Binding SplitterWidth}"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- 상단 실행 헤더: 설정 선택 · 시드 목록 · Place Hints · Run/Stop -->
+        <Grid Grid.Row="0" Grid.ColumnSpan="3" Margin="6,4,6,6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="220"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0">
+                <TextBlock Text="Swarm Optimization" FontSize="13" FontWeight="Bold" Foreground="#e0e0ff"/>
+                <TextBlock Text="{Binding InputData.ProjectName, StringFormat='Project Name : {0}'}"
+                           FontSize="10" Foreground="#8888aa" TextTrimming="CharacterEllipsis"/>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Optimizer Config" FontSize="10" Foreground="#8888aa" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <StackPanel Orientation="Horizontal">
+                        <StackPanel.Style>
+                            <Style TargetType="StackPanel">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsRunning}" Value="True">
+                                        <Setter Property="IsEnabled" Value="False"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </StackPanel.Style>
+                        <ComboBox ItemsSource="{Binding Source={StaticResource OptimizerOptions}}" SelectedItem="{Binding SelectedOption}"
+                                  Width="110" FontSize="10" Background="#2a2a4a" Foreground="#e0e0ff" BorderBrush="#3a3a5a"
+                                  ToolTip="목록의 모든 시드에 같은 설정을 사용합니다. 예: CustomConfig 선택 후 Run을 누르면 각 시드에 동일한 사용자 설정을 적용합니다."/>
+                        <TextBlock Text="시드" Foreground="WhiteSmoke" VerticalAlignment="Center" Margin="6,0,4,0"/>
+                        <TextBox Text="{Binding SeedListText, Mode=OneWay}" IsReadOnly="True" Width="85" FontSize="10"
+                                 Background="#2a2a4a" Foreground="#e0e0ff" BorderBrush="#3a3a5a"
+                                 ToolTip="{Binding SeedListText, StringFormat='실행할 시드: {0}. 최대 6개이며 0은 무작위입니다. 예: 0·1·2는 무작위 1회와 고정 시드 1·2를 동시에 실행합니다.'}"/>
+                        <TextBox Text="{Binding SeedEntryText, UpdateSourceTrigger=PropertyChanged}" Width="46" Margin="4,0,0,0" FontSize="10"
+                                 PreviewTextInput="OnSeedTextInput" PreviewKeyDown="OnSeedPreviewKeyDown" DataObject.Pasting="OnSeedPaste"
+                                 InputMethod.IsInputMethodEnabled="False" AllowDrop="False" MaxLength="20"
+                                 Background="#2a2a4a" Foreground="#e0e0ff" BorderBrush="#3a3a5a"
+                                 ToolTip="0~18446744073709551615 정수를 입력하세요. 예: 2 입력 후 +는 추가, 휴지통은 목록의 2를 삭제합니다. 0은 무작위 실행입니다."/>
+                        <Button Command="{Binding AddSeedCommand}" Width="24" Margin="3,0,0,0" Padding="2" Foreground="#22bbee"
+                                AutomationProperties.Name="시드 추가"
+                                ToolTip="입력한 시드를 추가합니다. 예: 목록이 0, 1일 때 2를 추가하면 0, 1, 2가 됩니다. 중복은 추가하지 않습니다.">
+                            <TextBlock Text="⊕" FontSize="17" VerticalAlignment="Center"/>
+                        </Button>
+                        <Button Command="{Binding RemoveSeedCommand}" Width="24" Margin="3,0,0,0" Padding="2" Foreground="#ff5555"
+                                AutomationProperties.Name="시드 삭제"
+                                ToolTip="오른쪽 입력칸의 시드를 목록에서 삭제합니다. 예: 2 입력 후 누르면 목록의 2만 삭제합니다.">
+                            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE74D;" FontSize="12" VerticalAlignment="Center"/>
+                        </Button>
+                    </StackPanel>
+                    <shared:ToggleSwitch IsChecked="{Binding UseHints}"
+                                         OnContent="Place Hints ON"
+                                         OffContent="Place Hints OFF"
+                                         Margin="8,0,0,0" VerticalAlignment="Center"
+                                         FontSize="10"
+                                         Foreground="WhiteSmoke"
+                                         ToolTip="OFF이면 movable warm-start hint를 사용하지 않습니다. 잠금 hint와 PlaceGroup 상대 pose는 항상 유지됩니다."/>
+                    <Button Content="▶ Run" Command="{Binding RunCommand}" Style="{StaticResource RunButton}" FontSize="10" Height="24" Margin="12,0,0,0"
+                            ToolTip="목록의 모든 시드를 일괄 실행합니다. 예: 1, 7, 42는 각각의 시드로 동시에 실행하고 최상 결과를 표시합니다."/>
+                    <Button Content="■ Stop" Command="{Binding StopCommand}" Style="{StaticResource StopButton}" FontSize="10" Height="24" Margin="6,0,0,0"
+                            ToolTip="실행 중인 모든 시드를 일괄 중지합니다. 예: 3개 시드가 실행 중이면 모두 중단을 요청하고 마지막 인증 결과를 유지합니다."/>
+                    <TextBlock Text="실행 중…" Foreground="WhiteSmoke" FontSize="10" VerticalAlignment="Center" Margin="6,0,0,0"
+                               Visibility="{Binding IsRunning, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                    <!-- Init 직후부터 마지막 단계(또는 Structure) 종료까지의 경과 시간. 끝나면 마지막 값으로 고정된다. -->
+                    <TextBlock Text="{Binding PhaseElapsedText}" Foreground="#FFB0C4DE" FontSize="10" FontFamily="Consolas" VerticalAlignment="Center" Margin="8,0,0,0"
+                               ToolTip="Init 완료 직후 시작해 선택한 마지막 단계(또는 Structure)가 끝나면 멈추는 경과 시간. Init 자체는 포함하지 않는다."/>
+                </StackPanel>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Bottom">
+                <TextBlock Text="{Binding ResolvedSeedsText}" ToolTip="{Binding ResolvedSeedsText}" Foreground="#FFB0C4DE" FontSize="10" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Text="{Binding WinningSeedText}" ToolTip="{Binding WinningSeedText}" Foreground="#FF80E0B0" FontSize="10" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Text="{Binding MultiSeedStatus}" ToolTip="{Binding MultiSeedStatus}" Foreground="#FFB0C4DE" FontSize="10" TextTrimming="CharacterEllipsis"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- 좌측 패널 -->
+        <Border Grid.Row="1" Grid.Column="0" Background="{DynamicResource {x:Static themes:AssetResourceKeys.ContainerBackgroundLowestBrushKey}}"
+                Visibility="{Binding ShowLeftPanel, Converter={StaticResource BooleanToVisibilityConverter}}">
+            <Grid Margin="6,4">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>  <!-- Presets -->
+                    <RowDefinition Height="Auto"/>  <!-- Grouping / Structure summary -->
+                    <RowDefinition Height="Auto"/>  <!-- Placed hint -->
+                    <RowDefinition Height="Auto"/>  <!-- Seed status / Shrink step -->
+                    <RowDefinition Height="*"/>     <!-- Config panel -->
+                    <RowDefinition Height="0"/>     <!-- Log -->
+                    <RowDefinition Height="Auto"/>  <!-- Status -->
+                </Grid.RowDefinitions>
+
+                <!-- Custom Config 프리셋 (CustomConfig 선택 시만 표시) -->
+                <Border Grid.Row="0">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding SelectedOption}" Value="CustomConfig">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <StackPanel Margin="0,0,0,8">
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <TextBlock Text="Custom Config 프리셋" Foreground="WhiteSmoke" FontSize="11"/>
+                            <TextBlock Grid.Column="1" Text="{Binding PresetStatus}" ToolTip="{Binding PresetStatus}" TextTrimming="CharacterEllipsis"
+                                       FontSize="10" Foreground="#FFB0C4DE" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                        </Grid>
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <ComboBox ItemsSource="{Binding Presets}" SelectedItem="{Binding SelectedPreset, Mode=TwoWay}"
+                                      DisplayMemberPath="Name" IsEditable="False" DropDownOpened="OnPresetDropDownOpened"
+                                      Background="#2a2a4a" Foreground="#e0e0ff" BorderBrush="#3a3a5a"
+                                      AutomationProperties.Name="Custom Config 프리셋 선택"
+                                      ToolTip="저장한 프리셋을 선택한 뒤 적용을 누르세요. 선택만으로 설정은 바뀌지 않습니다. 예: 빠른 탐색 선택 → 적용."/>
+                            <Button Grid.Column="1" Content="적용" Command="{Binding ApplyPresetCommand}" Margin="4,0,0,0" Padding="6,2"
+                                    ToolTip="선택한 프리셋의 설정과 단계 순서를 반영합니다. 예: Explore → Polish → Explore도 저장된 순서대로 복원됩니다."/>
+                            <Button Grid.Column="2" Content="삭제" Command="{Binding DeletePresetCommand}" Margin="4,0,0,0" Padding="6,2"
+                                    ToolTip="선택한 프리셋을 저장 목록에서 삭제합니다. 현재 설정과 불러온 원본 파일은 유지됩니다. 예: 시험용 프리셋만 삭제."/>
+                        </Grid>
+                        <DockPanel Margin="0,5,0,0">
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                <Button Content="추가" Command="{Binding AddPresetCommand}" Padding="6,2" Margin="0,0,4,0"
+                                        ToolTip="현재 입력한 설정을 이 이름으로 저장하고 목록에 추가합니다. 예: 이름을 WSjk 빠른 배치로 입력하고 추가."/>
+                                <Button Content="JSON 저장" Command="{Binding SavePresetJsonCommand}" Padding="6,2" Margin="0,0,4,0"
+                                        ToolTip="선택된 프리셋 하나의 저장된 설정만 내보냅니다. 예: Custom 2026.json으로 저장하면 목록 이름도 Custom 2026이 됩니다. 미저장 편집값은 먼저 추가하세요."/>
+                                <Button Content="JSON 불러오기" Command="{Binding LoadPresetJsonCommand}" Padding="6,2"
+                                        ToolTip="파일명으로 프리셋을 추가하며 같은 이름이 있으면 불러오기에 실패합니다. 예: Custom 2026.json → Custom 2026. 설정 반영은 적용을 누르세요."/>
+                            </StackPanel>
+                            <TextBox Text="{Binding PresetName, UpdateSourceTrigger=PropertyChanged}" MaxLength="120" Margin="0,0,4,0"
+                                     Background="#2a2a4a" Foreground="#e0e0ff" BorderBrush="#3a3a5a"
+                                     AutomationProperties.Name="프리셋 이름"
+                                     ToolTip="추가할 프리셋의 이름입니다. JSON 저장은 선택된 프리셋을 파일명으로 저장합니다. 예: WSjk 3분 탐색. 같은 이름은 (2) 등을 붙여 기존 프리셋을 보존합니다."/>
+                        </DockPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- 입력 JSON이 placed_hint로 배치를 담고 있으면 그 배치의 효율과
+                     겹침을 로드 즉시 보여준다. 상용 마커를 변환한 입력에서는 이 값이
+                     실행 결과와 비교할 기준선이다. 힌트가 없으면 통째로 숨긴다. -->
+                <Border Grid.Row="2" Background="#101a26" BorderBrush="#2a4a66" BorderThickness="1"
+                        CornerRadius="4" Padding="8,6" Margin="0,0,0,8"
+                        Visibility="{Binding InputSummary.HintedLayout.IsAvailable,
+                                             Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.ColumnSpan="2" Text="입력 배치 (placed_hint)"
+                                   FontSize="9" Foreground="#6f8fae" Margin="0,0,0,4"/>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="효율" FontSize="11"
+                                   Foreground="#8888aa" Margin="0,0,10,0"/>
+                        <TextBlock Grid.Row="1" Grid.Column="1"
+                                   Text="{Binding InputSummary.HintedLayout.EfficiencyText}"
+                                   FontSize="13" FontWeight="Bold" Foreground="#7fd1a0"
+                                   FontFamily="Consolas"/>
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="겹침" FontSize="11"
+                                   Foreground="#8888aa" Margin="0,3,10,0"/>
+                        <TextBlock Grid.Row="2" Grid.Column="1"
+                                   Text="{Binding InputSummary.HintedLayout.OverlapText}"
+                                   FontSize="11" Foreground="#e0b877" FontFamily="Consolas"
+                                   Margin="0,3,0,0" TextWrapping="Wrap"/>
+
+                        <TextBlock Grid.Row="3" Grid.Column="1"
+                                   Text="{Binding InputSummary.HintedLayout.ExtentText}"
+                                   FontSize="10" Foreground="#7a7a99" FontFamily="Consolas"
+                                   Margin="0,4,0,0" TextWrapping="Wrap"/>
+                    </Grid>
+                </Border>
+
+                <!-- 시드 입력 안내 · 실시간 축소 스텝 -->
+                <StackPanel Grid.Row="3" Margin="0,0,0,8">
+                    <TextBlock Text="{Binding SeedInputStatus}" Foreground="#FFB0C4DE" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,4">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding SeedInputStatus}" Value="">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                    <!-- 탐색 축소 스텝: 실행 중에도 재설정할 수 있다 -->
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Shrink Step" VerticalAlignment="Center"
+                                   Foreground="WhiteSmoke" FontSize="11"/>
+                        <TextBox Text="{Binding ShrinkStepInput, UpdateSourceTrigger=PropertyChanged, StringFormat={}{0:0.#####}}"
+                                 Width="70" Margin="6,0,0,0" VerticalAlignment="Center"
+                                 ToolTip="현재 폭 대비 축소 비율 (0 &lt; step &lt; 1). 실행 중에 적용해도 된다. 여러 시드를 실행 중이면 모든 시드에 적용한다."/>
+                        <Button Content="적용" Command="{Binding ApplyShrinkStepCommand}"
+                                Width="46" Margin="6,0,0,0"/>
+                    </StackPanel>
+                    <TextBlock Text="{Binding ShrinkStepStatus}" Margin="0,3,0,0"
+                               Foreground="#FFB0C4DE" FontSize="10" TextWrapping="Wrap"/>
+                </StackPanel>
+
+                <!-- 입력 grouping 계약과 Structure 실행 상태/감사 결과 -->
+                <Border Grid.Row="1" Background="#0d0d1a" BorderBrush="#33334d" BorderThickness="1"
+                        CornerRadius="4" Padding="7,5" Margin="0,0,0,8">
+                    <Expander Header="Swarm Grouping / Structure">
+                        <Expander.Resources>
+                            <StaticResourceExtension x:Key="{x:Static themes:AssetResourceKeys.ExpanderHeaderBackgroundHoverBrushKey}"
+                                                     ResourceKey="{x:Static themes:AssetResourceKeys.ColorPaletteBlueBackgroundHighBrushKey}" />
+                            <StaticResourceExtension x:Key="{x:Static themes:AssetResourceKeys.ExpanderHeaderInnerBorderHoverBrushKey}"
+                                                     ResourceKey="{x:Static themes:AssetResourceKeys.ColorPaletteBlueBackgroundMidBrushKey}" />
+                        </Expander.Resources>
+                        <ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="2,6,2,2">
+                                <TextBlock Text="{Binding InputSummary.DisplayText}"
+                                           TextWrapping="Wrap" FontFamily="Consolas"
+                                           Foreground="#b8c7e0" FontSize="10"/>
+                                <Separator Margin="0,6,0,5" Background="#33334d"/>
+                                <TextBlock Text="{Binding StructureProgressText}"
+                                           TextWrapping="Wrap" FontWeight="SemiBold"
+                                           Foreground="#8ec5ff" FontSize="10"/>
+                                <TextBlock Text="{Binding StructureReportSummary.DisplayText}"
+                                           TextWrapping="Wrap" FontFamily="Consolas"
+                                           Foreground="#b8e0c0" FontSize="10" Margin="0,4,0,0"/>
+                                <Button Content="Structure report JSON 저장"
+                                        Command="{Binding ExportStructureReportCommand}"
+                                        Style="{StaticResource GeneralButton}"
+                                        HorizontalAlignment="Left" Margin="0,7,0,0"/>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Expander>
+                </Border>
+
+                <!-- 네스팅 설정 패널 (Simple/CustomConfig 선택 시만 표시) -->
+                <Border Grid.Row="4" Margin="0,0,0,6">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding SelectedOption}" Value="CustomConfig">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <Grid>
+                        <local:NestingConfigView DataContext="{Binding Config}" VerticalAlignment="Stretch"/>
+                    </Grid>
+                </Border>
+
+                <!-- 로그 -->
+                <!--<TextBox Grid.Row="5" Text="{Binding OutputLog, Mode=OneWay}"
+                         IsReadOnly="True" VerticalScrollBarVisibility="Visible"
+                         FontFamily="Consolas" FontSize="11"
+                         Background="#0d0d1a" Foreground="#aabbcc"
+                         BorderThickness="0" Margin="0,0,0,0" />-->
+
+                <!-- 상태 표시줄 -->
+                <Border Grid.Row="6" CornerRadius="3" Padding="6,3" Margin="0,6,0,0">
+                    <TextBlock FontSize="10" Foreground="WhiteSmoke"
+                               Text="{Binding SelectedOption, StringFormat='Option: {0}'}"/>
+                </Border>
+            </Grid>
+        </Border>
+
+        <!-- 구분선 -->
+        <GridSplitter Grid.Row="1" Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
+                      Background="{DynamicResource {x:Static themes:AssetResourceKeys.WindowBackgroundNormalBrushKey}}"
+                      Visibility="{Binding ShowLeftPanel, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+
+        <!-- 우측: SkiaSharp 캔버스 -->
+        <Border Grid.Row="1" Grid.Column="2" Background="{DynamicResource {x:Static themes:AssetResourceKeys.ContainerBackgroundLowestBrushKey}}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="10"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="4"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <skia:SKElement Grid.Row="0" Margin="0" PaintSurface="OnPaintSurface" x:Name="Canvas"/>
+
+                <StackPanel Grid.Row="2" HorizontalAlignment="Left" Margin="4,0,0,0" Orientation="Horizontal">
+                    <shared:ToggleSwitch IsChecked="{Binding ShowLeftPanel}" OnContent="좌측 패널 표시" OffContent="좌측 패널 숨기기" FontSize="10" Foreground="WhiteSmoke" />
+                    <!-- 개발중 -->
+                    <!--<shared:ToggleSwitch IsChecked="{Binding ShowCollisions}" OnContent="충돌" OffContent="충돌" FontSize="10" Foreground="WhiteSmoke" Margin="12,0,0,0"/>-->
+                </StackPanel>
+
+                <StackPanel Grid.Row="2" HorizontalAlignment="Right" Margin="0,0,4,0" Orientation="Horizontal">
+                    <Button Content="로그 맨 위로"
+                            Command="{Binding ScrollToTopCommand}"
+                            CommandParameter="{Binding ElementName=txt_log}"
+                            Style="{StaticResource GeneralButton}"/>
+                    <Button Content="로그 맨 아래로"
+                            Margin="8,0,0,0"
+                            Command="{Binding ScrollToEndCommand}"
+                            CommandParameter="{Binding ElementName=txt_log}"
+                            Style="{StaticResource GeneralButton}"/>
+                </StackPanel>
+
+                <!-- 로그 -->
+                <TextBox x:Name="txt_log" Grid.Row="4" IsReadOnly="True" VerticalScrollBarVisibility="Visible" Height="200"
+                         FontFamily="Consolas" FontSize="11"
+                         Background="#0d0d1a" Foreground="#aabbcc"
+                         BorderThickness="0" Margin="4"
+                         Text="{Binding OutputLog, Mode=OneWay}"/>
+
+            </Grid>            
+        </Border>
+    </Grid>
+</UserControl>

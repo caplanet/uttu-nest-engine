@@ -1,0 +1,2746 @@
+--- a/src/ffi_step.rs
++++ b/src/ffi_step.rs
+@@ -417,9 +417,18 @@
+ 
+ /// Callback payload용 loss와 collision status를 한 번의 CDE 순회로 계산한다.
+ /// 둘 다 필요하지 않으면 호출자가 이 함수를 건너뛰어야 한다.
++#[cfg(test)]
+ fn compute_callback_diagnostics(
+     layout: &jagua_rs::entities::Layout,
+     options: CallbackOptions,
++) -> CallbackDiagnostics {
++    compute_callback_diagnostics_with_frozen(layout, options, &[])
++}
++
++fn compute_callback_diagnostics_with_frozen(
++    layout: &jagua_rs::entities::Layout,
++    options: CallbackOptions,
++    frozen_ids: &[usize],
+ ) -> CallbackDiagnostics {
+     use crate::quantify::{quantify_collision_poly_container, quantify_collision_poly_poly};
+     use jagua_rs::collision_detection::hazards::HazardEntity;
+@@ -436,6 +445,10 @@
+     let mut collision_flags = vec![false; placed.len()];
+     let mut collector = BasicHazardCollector::with_capacity(layout.placed_items.len() + 1);
+     let container_bbox = layout.container.outer_cd.bbox;
++    let frozen = frozen_ids
++        .iter()
++        .copied()
++        .collect::<std::collections::HashSet<_>>();
+ 
+     // 정적 hazard 만 아이템마다 질의한다. 조각쌍 hazard 는 여기서 일부러 버리고,
+     // 아래의 **대칭** 직접 쌍 검사 한 번으로 대신한다.
+@@ -490,7 +503,7 @@
+             match entity {
+                 HazardEntity::PlacedItem { .. } => {}
+                 HazardEntity::Exterior => {
+-                    if outside_strip {
++                    if outside_strip && !frozen.contains(&pi_a.item_id) {
+                         collision_flags[index] = true;
+                         if options.collect_loss {
+                             total_loss +=
+@@ -509,6 +522,9 @@
+         for second in first + 1..placed.len() {
+             let first_item = placed[first].1;
+             let second_item = placed[second].1;
++            if frozen.contains(&first_item.item_id) && frozen.contains(&second_item.item_id) {
++                continue;
++            }
+             if crate::eval::lbf_evaluator::polygons_collide_bidirectionally(
+                 &first_item.shape,
+                 &second_item.shape,
+@@ -540,23 +556,11 @@
+     }
+ }
+ 
+-/// 각 Place의 충돌 상태를 계산하여 반환한다. Getter는 callback 설정과 독립적이다.
+-fn compute_collision_status(layout: &jagua_rs::entities::Layout) -> Vec<CollisionStatus> {
+-    compute_callback_diagnostics(
+-        layout,
+-        CallbackOptions {
+-            collect_loss: false,
+-            collect_collision_status: true,
+-        },
+-    )
+-    .collision_status
+-    .unwrap_or_default()
+-}
+-
+ /// CallbackListener 구조체: SolutionCallback을 구현하며, 중간/최종 결과를 콜백함.
+ /// layout 필드는 raw pointer로 저장하여 borrow checker 충돌을 피함.
+ /// (explore/compress phase에서 sep의 불변 빌림과 가변 빌림이 동시에 필요하기 때문)
+ struct CallbackListener {
++    frozen_ids: Vec<usize>,
+     callback: SolutionCallback,
+     user_data: *mut std::ffi::c_void,
+     emit_json: bool,
+@@ -577,6 +581,7 @@
+ 
+ #[derive(Default)]
+ struct ExactSolutionCache {
++    frozen_ids: Vec<usize>,
+     /// Latest native feasible/final report. One deep clone is shared through Rc.
+     pending: Option<Rc<SPSolution>>,
+     pending_version: u64,
+@@ -604,6 +609,7 @@
+         let solution = solution.map(Rc::new);
+         let version = u64::from(solution.is_some());
+         Self {
++            frozen_ids: Vec::new(),
+             pending: solution.clone(),
+             pending_version: version,
+             validated_version: version,
+@@ -612,6 +618,11 @@
+                 payload: None,
+             }),
+         }
++    }
++
++    fn with_frozen_ids(mut self, ids: &[usize]) -> Self {
++        self.frozen_ids = ids.to_vec();
++        self
+     }
+ }
+ 
+@@ -642,14 +653,13 @@
+     solution: &ExtSPSolution,
+     instance: &SPInstance,
+     options: CallbackOptions,
++    frozen_ids: &[usize],
+ ) -> CallbackDiagnostics {
+     if !options.collect_loss && !options.collect_collision_status {
+         return CallbackDiagnostics::default();
+     }
+-    let imported = jagua_rs::probs::spp::io::import_solution(instance, solution);
+-    let mut prob = SPProblem::new(instance.clone());
+-    prob.restore(&imported);
+-    compute_callback_diagnostics(&prob.layout, options)
++    let prob = crate::util::frozen::import_solution(instance, solution);
++    compute_callback_diagnostics_with_frozen(&prob.layout, options, frozen_ids)
+ }
+ 
+ fn serialize_callback_payload(
+@@ -685,17 +695,22 @@
+     instance: &SPInstance,
+     callback_options: CallbackOptions,
+     certified_exact: bool,
++    frozen_ids: &[usize],
+ ) {
+     let strip_width = solution.strip_width();
+     let density = solution.density(instance);
+     if emit_json {
+         let ext_sol = jagua_rs::probs::spp::io::export(instance, solution, *crate::EPOCH);
+         let diagnostics = if certified_exact {
+-            certified_callback_diagnostics(&ext_sol, instance, callback_options)
++            certified_callback_diagnostics(&ext_sol, instance, callback_options, frozen_ids)
+         } else if callback_options.collect_loss || callback_options.collect_collision_status {
+             let mut reported_prob = SPProblem::new(instance.clone());
+-            reported_prob.restore(solution);
+-            compute_callback_diagnostics(&reported_prob.layout, callback_options)
++            crate::util::frozen::restore(&mut reported_prob, solution);
++            compute_callback_diagnostics_with_frozen(
++                &reported_prob.layout,
++                callback_options,
++                frozen_ids,
++            )
+         } else {
+             CallbackDiagnostics::default()
+         };
+@@ -713,19 +728,34 @@
+     );
+ }
+ 
++#[cfg(test)]
+ fn certify_legacy_candidate(
+     instance: &SPInstance,
+     candidate: SPSolution,
+     fallback: &SPSolution,
+     phase_name: &str,
+ ) -> Result<SPSolution, String> {
+-    match crate::structure::pipeline::solution_validation_error(instance, &candidate) {
++    certify_legacy_candidate_policy(instance, candidate, fallback, phase_name, &[])
++}
++
++fn certify_legacy_candidate_policy(
++    instance: &SPInstance,
++    candidate: SPSolution,
++    fallback: &SPSolution,
++    phase_name: &str,
++    frozen_ids: &[usize],
++) -> Result<SPSolution, String> {
++    match crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++        instance, &candidate, frozen_ids,
++    ) {
+         None => Ok(candidate),
+         Some(candidate_error) => {
+             log::warn!(
+                 "[{phase_name}] rejected non-exact candidate and restored the certified fallback: {candidate_error:?}"
+             );
+-            match crate::structure::pipeline::solution_validation_error(instance, fallback) {
++            match crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                instance, fallback, frozen_ids,
++            ) {
+                 None => Ok(fallback.clone()),
+                 Some(fallback_error) => Err(format!(
+                     "{phase_name} produced an invalid candidate ({candidate_error:?}) and its fallback is also invalid ({fallback_error:?})"
+@@ -750,9 +780,15 @@
+     }
+     if !crate::util::assertions::frozen_poses_preserved(fallback, &candidate, &mask) {
+         log::warn!("[{phase_name}] rejected candidate that moved a frozen item");
+-        return certify_legacy_candidate(instance, fallback.clone(), fallback, phase_name);
+-    }
+-    certify_legacy_candidate(instance, candidate, fallback, phase_name)
++        return certify_legacy_candidate_policy(
++            instance,
++            fallback.clone(),
++            fallback,
++            phase_name,
++            frozen_ids,
++        );
++    }
++    certify_legacy_candidate_policy(instance, candidate, fallback, phase_name, frozen_ids)
+ }
+ 
+ fn retain_exact_solution(
+@@ -786,7 +822,13 @@
+     let Some((version, candidate)) = candidate else {
+         return;
+     };
+-    if crate::structure::pipeline::solution_validation_error(instance, &candidate).is_none() {
++    if crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++        instance,
++        &candidate,
++        &latest.borrow().frozen_ids,
++    )
++    .is_none()
++    {
+         let mut latest = latest.borrow_mut();
+         latest.validated_version = version;
+         latest.certified = Some(CertifiedExactSnapshot {
+@@ -808,6 +850,7 @@
+     callback_options: CallbackOptions,
+ ) -> bool {
+     let mut cache = cache.borrow_mut();
++    let frozen_ids = cache.frozen_ids.clone();
+     let Some(certified) = cache.certified.as_mut() else {
+         return false;
+     };
+@@ -816,7 +859,8 @@
+     if emit_json && certified.payload.is_none() {
+         let ext_sol =
+             jagua_rs::probs::spp::io::export(instance, certified.solution.as_ref(), *crate::EPOCH);
+-        let diagnostics = certified_callback_diagnostics(&ext_sol, instance, callback_options);
++        let diagnostics =
++            certified_callback_diagnostics(&ext_sol, instance, callback_options, &frozen_ids);
+         certified.payload = serialize_callback_payload(&ext_sol, &diagnostics);
+     }
+     let json_ptr = certified
+@@ -906,6 +950,7 @@
+             instance,
+             self.callback_options,
+             false,
++            &self.frozen_ids,
+         );
+         if emit_json_now {
+             self.last_emit.set(Some(Instant::now()));
+@@ -948,10 +993,19 @@
+     let density = solution.density;
+     if emit_intermediate_json {
+         let diagnostics = if certified_exact {
+-            certified_callback_diagnostics(&solution, solver.full_instance(), callback_options)
++            certified_callback_diagnostics(
++                &solution,
++                solver.full_instance(),
++                callback_options,
++                solver.frozen_ids(),
++            )
+         } else if callback_options.collect_loss || callback_options.collect_collision_status {
+             let prob = solver.restored_problem_from_exported(&solution);
+-            compute_callback_diagnostics(&prob.layout, callback_options)
++            compute_callback_diagnostics_with_frozen(
++                &prob.layout,
++                callback_options,
++                solver.frozen_ids(),
++            )
+         } else {
+             CallbackDiagnostics::default()
+         };
+@@ -987,6 +1041,8 @@
+     /// 좌표 사용 여부와는 **무관하다**. 힌트를 보내면 `tr_x`/`tr_y`/`rot_angle_in_rad`는
+     /// 항상 시작 위치로 쓰이고, 이 값이 1이면 그 위에 "이동 금지"가 더해질 뿐이다.
+     /// 0이면 그 좌표에서 출발하되 탐색/압축이 자유롭게 옮긴다(warm start).
++    /// 잠금끼리의 겹침과 잠금의 strip 이탈은 Init/모든 단계/검증/진단에서 허용된다.
++    /// 미잠금 Place는 잠금 Place를 장애물로 취급하며 strip 내부에 있어야 한다.
+     ///
+     /// 주의: 고정은 배치된 개체가 아니라 **아이템 종류(`item_id`)** 단위로 걸린다.
+     /// 한 종류의 수량이 2개 이상인 인스턴스에서 그 종류를 고정하면 (힌트로 놓은 것뿐 아니라)
+@@ -1313,7 +1369,7 @@
+         return true;
+     }
+     if required_width > prob.strip_width() {
+-        prob.change_strip_width(required_width);
++        crate::util::frozen::change_strip_width(prob, required_width);
+     }
+     for (old_key, item_id, target) in moves {
+         prob.remove_item(old_key);
+@@ -1322,13 +1378,19 @@
+             d_transf: target,
+         });
+     }
+-    prob.fit_strip();
++    let mask = crate::util::frozen::mask(
++        prob.instance.items.len(),
++        &frozen.iter().copied().collect::<Vec<_>>(),
++    );
++    crate::util::frozen::fit_strip_with_frozen(prob, &mask);
+     let candidate = prob.save();
+-    if let Some(error) =
+-        crate::structure::pipeline::solution_validation_error(&prob.instance, &candidate)
+-    {
++    if let Some(error) = crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++        &prob.instance,
++        &candidate,
++        &frozen.iter().copied().collect::<Vec<_>>(),
++    ) {
+         log::warn!("[INIT] rolled back {:?} stripe snap: {error:?}", axis);
+-        prob.restore(&before);
++        crate::util::frozen::restore(prob, &before);
+         return false;
+     }
+     true
+@@ -1388,6 +1450,7 @@
+             base_bbox.y_max,
+         ];
+         if enforce_strip_bounds
++            && !seed.frozen
+             && !crate::structure::pipeline::bbox_is_contained_mm(
+                 fixed_bounds,
+                 [bbox.x_min, bbox.x_max, bbox.y_min, bbox.y_max],
+@@ -1411,6 +1474,17 @@
+     if required_width > prob.strip_width() {
+         prob.change_strip_width(required_width);
+     }
++    let boxes = placements
++        .iter()
++        .map(|seed| {
++            instance
++                .item(seed.placement.item_id)
++                .shape_cd
++                .transform_clone(&seed.placement.d_transf.compose())
++                .bbox
++        })
++        .collect::<Vec<_>>();
++    crate::util::frozen::prepare_placements(&mut prob, boxes);
+     for seed in placements {
+         prob.place_item(seed.placement);
+     }
+@@ -1425,7 +1499,15 @@
+ ) -> Result<SPProblem, String> {
+     let prob = legacy_seed_problem_raw(instance, placements, preferred_width, true)?;
+     if let Some(error) =
+-        crate::structure::pipeline::partial_solution_validation_error(instance, &prob.save())
++        crate::structure::pipeline::partial_solution_validation_error_with_frozen_ids(
++            instance,
++            &prob.save(),
++            &placements
++                .iter()
++                .filter(|s| s.frozen)
++                .map(|s| s.placement.item_id)
++                .collect::<Vec<_>>(),
++        )
+     {
+         return Err(format!("seed layout is not exact-feasible: {error:?}"));
+     }
+@@ -1473,7 +1555,7 @@
+         ));
+     }
+     let mut resolved = SPProblem::new(instance.clone());
+-    resolved.restore(&solution);
++    crate::util::frozen::restore(&mut resolved, &solution);
+     if let Some(error) =
+         crate::structure::pipeline::partial_solution_validation_error(instance, &resolved.save())
+     {
+@@ -1921,8 +2003,11 @@
+         }
+     }
+ 
+-    let mut baseline_error =
+-        crate::structure::pipeline::solution_validation_error(&instance, &prob.save());
++    let mut baseline_error = crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++        &instance,
++        &prob.save(),
++        &freeze_ids,
++    );
+     if baseline_error.is_some() && requested_input_seed && !started_from_frozen_only {
+         log::warn!("[INIT] retrying invalid completed seed from the frozen-only baseline");
+         let frozen_prob = match legacy_seed_problem(&instance, &frozen_placements, 0.0) {
+@@ -1937,8 +2022,11 @@
+         };
+         prob = construct(frozen_prob);
+         started_from_frozen_only = true;
+-        baseline_error =
+-            crate::structure::pipeline::solution_validation_error(&instance, &prob.save());
++        baseline_error = crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++            &instance,
++            &prob.save(),
++            &freeze_ids,
++        );
+     }
+     if let Some(error) = baseline_error {
+         set_last_error(
+@@ -1963,9 +2051,11 @@
+     }
+ 
+     let init_solution = prob.save();
+-    if let Some(error) =
+-        crate::structure::pipeline::solution_validation_error(&instance, &init_solution)
+-    {
++    if let Some(error) = crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++        &instance,
++        &init_solution,
++        &freeze_ids,
++    ) {
+         set_last_error(
+             2001,
+             format!("Legacy Init baseline is not exact-feasible after stripe snap: {error:?}"),
+@@ -2070,8 +2160,12 @@
+ 
+     let fallback = match h.solution.clone() {
+         Some(solution)
+-            if crate::structure::pipeline::solution_validation_error(&h.instance, &solution)
+-                .is_none() =>
++            if crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                &h.instance,
++                &solution,
++                &h.frozen_item_ids,
++            )
++            .is_none() =>
+         {
+             solution
+         }
+@@ -2113,15 +2207,30 @@
+         let user = h.callback_user_data as *mut std::ffi::c_void;
+         let emit = h.emit_intermediate_json;
+         let opts = h.callback_options;
++        let frozen_ids = h.frozen_item_ids.clone();
+         let min_interval = h.structure_config.progress_callback_interval;
+         let instance = h.instance.clone();
+         let mut last_emit: Option<Instant> = None;
++        let frozen_mask = crate::util::frozen::mask(instance.items.len(), &frozen_ids);
+         let mut on_improve = |sol: &SPSolution| {
++            if !crate::util::assertions::frozen_poses_preserved(&fallback, sol, &frozen_mask) {
++                return;
++            }
+             let Some(callback) = cb else { return };
+             if last_emit.is_some_and(|t| t.elapsed() < min_interval) {
+                 return;
+             }
+-            report_legacy_solution(callback, user, emit, 2, sol, &instance, opts, false);
++            report_legacy_solution(
++                callback,
++                user,
++                emit,
++                2,
++                sol,
++                &instance,
++                opts,
++                false,
++                &frozen_ids,
++            );
+             last_emit = Some(Instant::now());
+         };
+ 
+@@ -2143,8 +2252,14 @@
+             Some(&mut on_improve),
+         );
+ 
+-        let committed = certify_legacy_candidate(&h.instance, best, &fallback, "INIT-N06")?;
+-        h.prob.restore(&committed);
++        let committed = certify_legacy_candidate_with_frozen(
++            &h.instance,
++            best,
++            &fallback,
++            "INIT-N06",
++            &h.frozen_item_ids,
++        )?;
++        crate::util::frozen::restore(&mut h.prob, &committed);
+         if let Some(callback) = h.solution_callback {
+             report_legacy_solution(
+                 callback,
+@@ -2155,6 +2270,7 @@
+                 &h.instance,
+                 h.callback_options,
+                 true,
++                &h.frozen_item_ids,
+             );
+         }
+         h.solution = Some(committed);
+@@ -2296,7 +2412,10 @@
+                 }
+             };
+             let solution_clock = Rc::clone(&last_emit);
+-            let latest_safe = Rc::new(RefCell::new(ExactSolutionCache::default()));
++            let callback_frozen_ids = h.solver.frozen_ids().to_vec();
++            let latest_safe = Rc::new(RefCell::new(
++                ExactSolutionCache::default().with_frozen_ids(&callback_frozen_ids),
++            ));
+             let safe_solution = Rc::clone(&latest_safe);
+             let first_preview = Cell::new(true);
+             let mut on_all_items_solution =
+@@ -2364,8 +2483,12 @@
+ 
+     let fallback = match h.solution.clone() {
+         Some(solution)
+-            if crate::structure::pipeline::solution_validation_error(&h.instance, &solution)
+-                .is_none() =>
++            if crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                &h.instance,
++                &solution,
++                &h.frozen_item_ids,
++            )
++            .is_none() =>
+         {
+             solution
+         }
+@@ -2392,6 +2515,7 @@
+         // branch listener dispatch (generic fn, can't dyn)
+         let solutions = if let Some(cb) = h.solution_callback {
+             let mut cb_listener = CallbackListener {
++                frozen_ids: h.frozen_item_ids.clone(),
+                 callback: cb,
+                 user_data: h.callback_user_data as *mut std::ffi::c_void,
+                 emit_json: h.emit_intermediate_json,
+@@ -2434,8 +2558,12 @@
+         h.solutions = solutions
+             .into_iter()
+             .filter(|solution| {
+-                crate::structure::pipeline::solution_validation_error(&h.instance, solution)
+-                    .is_none()
++                crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                    &h.instance,
++                    solution,
++                    &h.frozen_item_ids,
++                )
++                .is_none()
+             })
+             .collect();
+         let candidate = h
+@@ -2450,7 +2578,7 @@
+             "EXPL",
+             &h.frozen_item_ids,
+         )?;
+-        sep.prob.restore(&committed);
++        crate::util::frozen::restore(&mut sep.prob, &committed);
+         if let Some(callback) = h.solution_callback {
+             report_legacy_solution(
+                 callback,
+@@ -2461,6 +2589,7 @@
+                 &h.instance,
+                 h.callback_options,
+                 true,
++                &h.frozen_item_ids,
+             );
+         }
+         h.solution = Some(committed);
+@@ -2529,7 +2658,10 @@
+                 }
+             };
+             let solution_clock = Rc::clone(&last_emit);
+-            let latest_safe = Rc::new(RefCell::new(ExactSolutionCache::default()));
++            let callback_frozen_ids = h.solver.frozen_ids().to_vec();
++            let latest_safe = Rc::new(RefCell::new(
++                ExactSolutionCache::default().with_frozen_ids(&callback_frozen_ids),
++            ));
+             let safe_solution = Rc::clone(&latest_safe);
+             let first_preview = Cell::new(true);
+             let mut on_all_items_solution =
+@@ -2608,9 +2740,11 @@
+         Some(s) => s.clone(),
+         None => return -1,
+     };
+-    if let Some(error) =
+-        crate::structure::pipeline::solution_validation_error(&h.instance, &start_sol)
+-    {
++    if let Some(error) = crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++        &h.instance,
++        &start_sol,
++        &h.frozen_item_ids,
++    ) {
+         set_last_error(
+             3005,
+             format!("Legacy Compress start is not exact-certified: {error:?}"),
+@@ -2634,6 +2768,7 @@
+ 
+         let cmpr_sol = if let Some(cb) = h.solution_callback {
+             let mut cb_listener = CallbackListener {
++                frozen_ids: h.frozen_item_ids.clone(),
+                 callback: cb,
+                 user_data: h.callback_user_data as *mut std::ffi::c_void,
+                 emit_json: h.emit_intermediate_json,
+@@ -2683,6 +2818,7 @@
+                 &h.instance,
+                 h.callback_options,
+                 true,
++                &h.frozen_item_ids,
+             );
+         }
+         h.prob = sep.prob;
+@@ -2758,7 +2894,10 @@
+                 }
+             };
+             let solution_clock = Rc::clone(&last_emit);
+-            let latest_safe = Rc::new(RefCell::new(ExactSolutionCache::default()));
++            let callback_frozen_ids = h.solver.frozen_ids().to_vec();
++            let latest_safe = Rc::new(RefCell::new(
++                ExactSolutionCache::default().with_frozen_ids(&callback_frozen_ids),
++            ));
+             let safe_solution = Rc::clone(&latest_safe);
+             let first_preview = Cell::new(true);
+             let mut on_all_items_solution =
+@@ -2828,9 +2967,11 @@
+         Some(s) => s,
+         None => return -1,
+     };
+-    if let Some(error) =
+-        crate::structure::pipeline::solution_validation_error(&h.instance, &cmpr_sol)
+-    {
++    if let Some(error) = crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++        &h.instance,
++        &cmpr_sol,
++        &h.frozen_item_ids,
++    ) {
+         set_last_error(
+             3005,
+             format!("Legacy Polish start is not exact-certified: {error:?}"),
+@@ -2857,6 +2998,7 @@
+ 
+         let plsh_sol = if let Some(cb) = h.solution_callback {
+             let mut cb_listener = CallbackListener {
++                frozen_ids: h.frozen_item_ids.clone(),
+                 callback: cb,
+                 user_data: h.callback_user_data as *mut std::ffi::c_void,
+                 emit_json: h.emit_intermediate_json,
+@@ -2948,6 +3090,7 @@
+                 &h.instance,
+                 h.callback_options,
+                 true,
++                &h.frozen_item_ids,
+             );
+         }
+         h.prob = sep.prob;
+@@ -3061,7 +3204,10 @@
+                         milestone_clock.set(Some(Instant::now()));
+                     };
+                 let solution_clock = Rc::clone(&last_intermediate_emit);
+-                let latest_safe = Rc::new(RefCell::new(ExactSolutionCache::default()));
++                let callback_frozen_ids = h.solver.frozen_ids().to_vec();
++                let latest_safe = Rc::new(RefCell::new(
++                    ExactSolutionCache::default().with_frozen_ids(&callback_frozen_ids),
++                ));
+                 let safe_solution = Rc::clone(&latest_safe);
+                 let last_solution_stage = Cell::new(None);
+                 let mut on_all_items_solution =
+@@ -3069,7 +3215,8 @@
+                         let new_stage = last_solution_stage.get() != Some(stage);
+                         if new_stage {
+                             last_solution_stage.set(Some(stage));
+-                            *safe_solution.borrow_mut() = ExactSolutionCache::default();
++                            *safe_solution.borrow_mut() =
++                                ExactSolutionCache::default().with_frozen_ids(&callback_frozen_ids);
+                         }
+                         let interval_due = solution_clock
+                             .get()
+@@ -3158,7 +3305,12 @@
+         let callback_baseline = initial_baseline
+             .as_ref()
+             .filter(|solution| {
+-                crate::structure::pipeline::solution_validation_error(&instance, solution).is_none()
++                crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                    &instance,
++                    solution,
++                    &h.frozen_item_ids,
++                )
++                .is_none()
+             })
+             .cloned();
+         let initial_solution =
+@@ -3191,9 +3343,10 @@
+             };
+             let result = if let Some(callback) = callback {
+                 let last_emit = Rc::new(Cell::new(None));
+-                let latest_exact = Rc::new(RefCell::new(ExactSolutionCache::from_certified(
+-                    callback_baseline.clone(),
+-                )));
++                let latest_exact = Rc::new(RefCell::new(
++                    ExactSolutionCache::from_certified(callback_baseline.clone())
++                        .with_frozen_ids(&frozen_item_ids),
++                ));
+                 // `swarm_init_from_json` already built one complete LBF solution. Publish that
+                 // exact baseline before P0 motif work so Structure never starts with a long,
+                 // visually silent interval.
+@@ -3213,6 +3366,7 @@
+                     return LegacyStructureOutcome::Cancelled;
+                 }
+                 let mut listener = CallbackListener {
++                    frozen_ids: frozen_item_ids.clone(),
+                     callback,
+                     user_data: callback_user_data as *mut std::ffi::c_void,
+                     emit_json: emit_intermediate_json,
+@@ -3230,14 +3384,16 @@
+                      report: ReportType,
+                      solution: &SPSolution,
+                      milestone_instance: &SPInstance| {
+-                        if crate::structure::pipeline::solution_validation_error(
++                        if crate::structure::pipeline::solution_validation_error_with_frozen_ids(
+                             milestone_instance,
+                             solution,
++                            &frozen_item_ids,
+                         )
+                         .is_none()
+                         {
+                             *milestone_exact.borrow_mut() =
+-                                ExactSolutionCache::from_certified(Some(solution.clone()));
++                                ExactSolutionCache::from_certified(Some(solution.clone()))
++                                    .with_frozen_ids(&frozen_item_ids);
+                         }
+                         if !report_cached_exact_solution(
+                             callback,
+@@ -3301,7 +3457,11 @@
+         match run {
+             Ok(LegacyStructureOutcome::Completed(solution, report)) => {
+                 if let Some(error) =
+-                    crate::structure::pipeline::solution_validation_error(&h.instance, &solution)
++                    crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                        &h.instance,
++                        &solution,
++                        &h.frozen_item_ids,
++                    )
+                 {
+                     set_last_error(
+                         3005,
+@@ -3309,7 +3469,7 @@
+                     );
+                     return -1;
+                 }
+-                h.prob.restore(&solution);
++                crate::util::frozen::restore(&mut h.prob, &solution);
+                 h.solutions.clear();
+                 h.solutions.push(solution.clone());
+                 h.solution = Some(solution);
+@@ -3329,7 +3489,7 @@
+                 // solution instead of whatever transient separator state was
+                 // active when stop arrived.
+                 if let Some(solution) = callback_baseline.or(initial_baseline) {
+-                    h.prob.restore(&solution);
++                    crate::util::frozen::restore(&mut h.prob, &solution);
+                     h.structure_report = Some(
+                         crate::structure::pipeline::StructureRunReport::cancelled_baseline(
+                             &h.instance,
+@@ -3403,7 +3563,11 @@
+                 None => return std::ptr::null_mut(),
+             };
+             if let Some(error) =
+-                crate::structure::pipeline::solution_validation_error(&h.instance, sol)
++                crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                    &h.instance,
++                    sol,
++                    &h.frozen_item_ids,
++                )
+             {
+                 set_last_error(
+                     3005,
+@@ -3454,12 +3618,25 @@
+                 None => return std::ptr::null_mut(),
+             };
+             let mut prob = h.prob.clone();
+-            prob.restore(solution);
++            crate::util::frozen::restore(&mut prob, solution);
+             prob
+         }
+         HandleEngine::Grouped(h) => h.solver.restored_problem(),
+     };
+-    let status = compute_collision_status(&prob.layout);
++    let frozen_ids = match &*engine {
++        HandleEngine::Legacy(h) => h.frozen_item_ids.clone(),
++        HandleEngine::Grouped(h) => h.solver.frozen_ids().to_vec(),
++    };
++    let status = compute_callback_diagnostics_with_frozen(
++        &prob.layout,
++        CallbackOptions {
++            collect_loss: false,
++            collect_collision_status: true,
++        },
++        &frozen_ids,
++    )
++    .collision_status
++    .unwrap_or_default();
+     let json = match serde_json::to_string(&status) {
+         Ok(json) => json,
+         Err(_) => return std::ptr::null_mut(),
+@@ -3499,12 +3676,25 @@
+                 None => return std::ptr::null_mut(),
+             };
+             let mut prob = h.prob.clone();
+-            prob.restore(solution);
++            crate::util::frozen::restore(&mut prob, solution);
+             prob
+         }
+         HandleEngine::Grouped(h) => h.solver.restored_problem(),
+     };
+-    let statuses = compute_collision_status(&prob.layout);
++    let frozen_ids = match &*engine {
++        HandleEngine::Legacy(h) => h.frozen_item_ids.clone(),
++        HandleEngine::Grouped(h) => h.solver.frozen_ids().to_vec(),
++    };
++    let statuses = compute_callback_diagnostics_with_frozen(
++        &prob.layout,
++        CallbackOptions {
++            collect_loss: false,
++            collect_collision_status: true,
++        },
++        &frozen_ids,
++    )
++    .collision_status
++    .unwrap_or_default();
+     let c_statuses: Vec<CCollisionStatus> = statuses
+         .into_iter()
+         .map(|status| CCollisionStatus {
+@@ -3589,10 +3779,14 @@
+                     return std::ptr::null_mut();
+                 };
+                 let mut prob = h.prob.clone();
+-                prob.restore(solution);
++                crate::util::frozen::restore(&mut prob, solution);
+                 prob
+             }
+             HandleEngine::Grouped(h) => h.solver.restored_problem(),
++        };
++        let frozen_ids = match &*engine {
++            HandleEngine::Legacy(h) => h.frozen_item_ids.as_slice(),
++            HandleEngine::Grouped(h) => h.solver.frozen_ids(),
+         };
+         let layout = &prob.layout;
+ 
+@@ -3629,6 +3823,11 @@
+                     && *pk > pk_a
+                 {
+                     let coll_id = layout.placed_items[*pk].item_id as i32;
++                    if frozen_ids.contains(&pi_a.item_id)
++                        && frozen_ids.contains(&(coll_id as usize))
++                    {
++                        continue;
++                    }
+                     // AABB 후보에 있는 쌍만 인정 (false positive 제거)
+                     if ids.binary_search(&coll_id).is_ok() {
+                         precise_colliding.insert(id);
+@@ -4102,7 +4301,7 @@
+     fn production_source() -> &'static str {
+         let src = include_str!("ffi_step.rs");
+         let cut = src
+-            .find("#[cfg(test)]")
++            .find("mod legacy_exact_boundary_tests {")
+             .expect("테스트 모듈 경계(`#[cfg(test)]`)를 찾지 못했다");
+         &src[..cut]
+     }
+@@ -4586,6 +4785,27 @@
+         jagua_rs::probs::spp::io::import_instance(&importer, &rectangle_instance()).unwrap()
+     }
+ 
++    #[test]
++    fn frozen_diagnostics_keep_movable_lock_collisions() {
++        let prob = hinted_problem(&[hint(0, true, -2.0, 5.0), hint(1, true, -2.0, 5.0)]);
++        let options = CallbackOptions {
++            collect_loss: true,
++            collect_collision_status: true,
++        };
++        let exempt = compute_callback_diagnostics_with_frozen(&prob.layout, options, &[0, 1]);
++        assert_eq!(exempt.loss, Some(0.0));
++        assert!(
++            exempt
++                .collision_status
++                .unwrap()
++                .iter()
++                .all(|s| !s.collision)
++        );
++        let mixed = compute_callback_diagnostics_with_frozen(&prob.layout, options, &[0]);
++        assert!(mixed.loss.unwrap() > 0.0);
++        assert!(mixed.collision_status.unwrap().iter().all(|s| s.collision));
++    }
++
+     fn hinted_problem(hints: &[CPlacedHint]) -> SPProblem {
+         let instance = internal_instance();
+         let placements = hints
+@@ -5265,7 +5485,7 @@
+     }
+ 
+     #[test]
+-    fn legacy_init_rejects_overlapping_frozen_hints() {
++    fn legacy_init_accepts_overlapping_frozen_hints() {
+         clear_last_error();
+         let hints = [hint(0, true, 5.0, 5.0), hint(1, true, 5.0, 5.0)];
+         let handle = build_handle(
+@@ -5277,8 +5497,9 @@
+             hints.to_vec(),
+         );
+ 
+-        assert!(handle.is_none());
+-        assert_eq!(swarm_get_last_error_code(), 2001);
++        let handle = handle.expect("frozen overlap must be accepted");
++        assert_eq!(swarm_get_last_error_code(), 0);
++        swarm_free(handle);
+     }
+ 
+     #[test]
+--- a/src/grouped_engine.rs
++++ b/src/grouped_engine.rs
+@@ -1,8 +1,9 @@
+ //! One-handle execution engine for the v2 all-item/size-region input.
++#[cfg(test)]
++use crate::structure::pipeline::solution_validation_error;
+ 
+ use crate::config::{CompressionConfig, ExplorationConfig, PolishConfig, SwarmConfig};
+ use crate::consts::LBF_SAMPLE_CONFIG;
+-use crate::eval::lbf_evaluator::flat_layout_collision_counts;
+ use crate::grouped_input::{NestingMode, PlacedHintInput, ValidatedInput};
+ use crate::optimizer::compress::compression_phase;
+ use crate::optimizer::lbf::LBFBuilder;
+@@ -18,7 +19,7 @@
+ };
+ use crate::structure::pipeline::{
+     P1CandidateRecord, P1CandidateSource, P1WinnerRecord, RepairCycleRecord, StageCheckpoint,
+-    StructureRunReport, StructureStage, solution_validation_error,
++    StructureRunReport, StructureStage,
+ };
+ use crate::util::listener::{ReportType, SolutionListener};
+ use crate::util::terminator::Terminator;
+@@ -119,6 +120,7 @@
+ pub struct GroupedStepState {
+     mode: NestingMode,
+     full_instance: SPInstance,
++    frozen_global_ids: Vec<usize>,
+     lanes: Vec<RegionLane>,
+     fixed_placements: Vec<ExtPlacedItem>,
+     fixed_right: f32,
+@@ -218,7 +220,15 @@
+                 })
+             })
+             .collect::<Result<Vec<_>, String>>()?;
+-        validate_group_geometry(&full_instance, &full_group_specs)?;
++        validate_group_geometry(
++            &full_instance,
++            &full_group_specs,
++            &input
++                .frozen_item_ids()
++                .iter()
++                .map(|&id| id as usize)
++                .collect::<Vec<_>>(),
++        )?;
+         let frozen_global = input.frozen_item_ids();
+         // A fixed prefix is a size-region rule only. In all_items mode frozen
+         // placements remain in the single lane and are already exported by
+@@ -289,6 +299,7 @@
+         }
+ 
+         Ok(Self {
++            frozen_global_ids: frozen_global.iter().map(|&id| id as usize).collect(),
+             mode: input.nesting.mode,
+             full_instance,
+             lanes,
+@@ -579,8 +590,15 @@
+     /// check also covers fixed-prefix/lane-offset integration.
+     pub fn export_certified_solution(&self) -> Result<ExtSPSolution, String> {
+         let ext = self.export_solution();
+-        let solution = jagua_rs::probs::spp::io::import_solution(&self.full_instance, &ext);
+-        if let Some(error) = solution_validation_error(&self.full_instance, &solution) {
++        if !ext.strip_width.is_finite() || ext.strip_width <= 0.0 {
++            return Err("merged public solution has an invalid strip width".to_string());
++        }
++        let solution = crate::util::frozen::import_solution(&self.full_instance, &ext).save();
++        if let Some(error) = crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++            &self.full_instance,
++            &solution,
++            &self.frozen_global_ids,
++        ) {
+             return Err(format!(
+                 "merged public solution is not exact-feasible: {error:?}"
+             ));
+@@ -682,8 +700,12 @@
+                 .iter()
+                 .enumerate()
+                 .find_map(|(lane_index, lane)| {
+-                    solution_validation_error(&lane.instance, &lane.solution)
+-                        .map(|error| (lane_index, error))
++                    crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                        &lane.instance,
++                        &lane.solution,
++                        &lane.frozen_ids,
++                    )
++                    .map(|error| (lane_index, error))
+                 })
+         {
+             return Err(format!(
+@@ -1174,7 +1196,13 @@
+                 // hints are repaired during Init, but this guard keeps the
+                 // public callback contract safe if a future initializer adds
+                 // another hinted path.
+-                if solution_validation_error(&lane.instance, &lane.solution).is_none() {
++                if crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                    &lane.instance,
++                    &lane.solution,
++                    &lane.frozen_ids,
++                )
++                .is_none()
++                {
+                     let report = match phase {
+                         LanePhase::Compression
+                         | LanePhase::Polish
+@@ -1328,7 +1356,13 @@
+         placed_items.sort_by_key(|placement| placement.item_id);
+ 
+         let strip_width = if self.lanes.is_empty() {
+-            self.fixed_right
++            // All locked pieces may be left of x=0. Keep the original positive
++            // width in that case; export/import must never create a zero strip.
++            if self.fixed_right > 0.0 {
++                self.fixed_right
++            } else {
++                self.full_instance.base_strip.width
++            }
+         } else {
+             offset
+         };
+@@ -1358,10 +1392,11 @@
+     /// Restore a merged solution that the caller already exported. Callback
+     /// reporting uses this to avoid repeating lane merge, ID remap and sort.
+     pub fn restored_problem_from_exported(&self, ext: &ExtSPSolution) -> SPProblem {
+-        let solution = jagua_rs::probs::spp::io::import_solution(&self.full_instance, ext);
+-        let mut prob = SPProblem::new(self.full_instance.clone());
+-        prob.restore(&solution);
+-        prob
++        crate::util::frozen::import_solution(&self.full_instance, ext)
++    }
++
++    pub fn frozen_ids(&self) -> &[usize] {
++        &self.frozen_global_ids
+     }
+ 
+     pub fn full_instance(&self) -> &SPInstance {
+@@ -1642,7 +1677,12 @@
+             (!fallback_reasons.is_empty()).then(|| fallback_reasons.join("; "));
+ 
+         let incumbent = self.solution.clone();
+-        let baseline_validation_error = solution_validation_error(&self.instance, &incumbent);
++        let baseline_validation_error =
++            crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                &self.instance,
++                &incumbent,
++                &self.frozen_ids,
++            );
+         let baseline_exact_valid = baseline_validation_error.is_none();
+         let incumbent_exact_valid = baseline_exact_valid;
+         let baseline_complete =
+@@ -1825,7 +1865,12 @@
+         };
+         let structure_hints = builder.structure_hint_stats().cloned();
+         let candidate = builder.prob.save();
+-        let validation_error = solution_validation_error(&self.instance, &candidate);
++        let validation_error =
++            crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                &self.instance,
++                &candidate,
++                &self.frozen_ids,
++            );
+         let exact_valid = validation_error.is_none();
+         let complete = structure_hints
+             .as_ref()
+@@ -1978,7 +2023,12 @@
+         candidate: SPSolution,
+         stage: StructureStage,
+     ) -> (bool, bool) {
+-        let exact = solution_validation_error(&self.instance, &candidate).is_none();
++        let exact = crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++            &self.instance,
++            &candidate,
++            &self.frozen_ids,
++        )
++        .is_none();
+         let mut improved = false;
+         if exact
+             && let Some(incumbent) = self.structure_incumbent.as_mut()
+@@ -2157,7 +2207,14 @@
+             );
+             if let Some(best) = resumed
+                 .iter()
+-                .filter(|solution| solution_validation_error(&self.instance, solution).is_none())
++                .filter(|solution| {
++                    crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                        &self.instance,
++                        solution,
++                        &self.frozen_ids,
++                    )
++                    .is_none()
++                })
+                 .min_by(|a, b| a.strip_width().total_cmp(&b.strip_width()))
+                 && best.strip_width() < candidate.strip_width()
+             {
+@@ -2238,7 +2295,13 @@
+                     sep.rollback(&snapped, Some(&snapshot));
+                     sep.refit_strip();
+                     let snapped_seed = sep.prob.save();
+-                    if solution_validation_error(&self.instance, &snapped_seed).is_none() {
++                    if crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                        &self.instance,
++                        &snapped_seed,
++                        &self.frozen_ids,
++                    )
++                    .is_none()
++                    {
+                         polish_seed = snapped_seed;
+                     } else {
+                         sep = self.separator(self.config.cmpr_cfg.separator_config);
+@@ -2298,7 +2361,14 @@
+         );
+         let committed = solutions
+             .iter()
+-            .filter(|solution| solution_validation_error(&self.instance, solution).is_none())
++            .filter(|solution| {
++                crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++                    &self.instance,
++                    solution,
++                    &self.frozen_ids,
++                )
++                .is_none()
++            })
+             .min_by(|a, b| a.strip_width().total_cmp(&b.strip_width()))
+             .cloned()
+             .unwrap_or(fallback);
+@@ -2331,7 +2401,13 @@
+             &config,
+         );
+         self.remember_tracker(LanePhase::Compression, &sep.ct);
+-        let committed = if solution_validation_error(&self.instance, &candidate).is_none() {
++        let committed = if crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++            &self.instance,
++            &candidate,
++            &self.frozen_ids,
++        )
++        .is_none()
++        {
+             candidate
+         } else {
+             log::warn!("[GROUPED:CMPR] rejected a non-exact lane candidate");
+@@ -2364,7 +2440,13 @@
+             &self.config.lp_solver,
+         );
+         self.remember_tracker(LanePhase::Polish, &sep.ct);
+-        let committed = if solution_validation_error(&self.instance, &candidate).is_none() {
++        let committed = if crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++            &self.instance,
++            &candidate,
++            &self.frozen_ids,
++        )
++        .is_none()
++        {
+             candidate
+         } else {
+             log::warn!("[GROUPED:PLSH] rejected a non-exact lane candidate");
+@@ -2379,7 +2461,7 @@
+ 
+ fn restored_lane_problem(instance: &SPInstance, solution: &SPSolution) -> SPProblem {
+     let mut problem = SPProblem::new(instance.clone());
+-    problem.restore(solution);
++    crate::util::frozen::restore(&mut problem, solution);
+     problem
+ }
+ 
+@@ -2462,46 +2544,17 @@
+ /// requiring complete item quantities. Exact contact with the rectangular
+ /// strip boundary follows the public hint contract and is accepted through
+ /// bbox containment; item pairs and non-exterior hazards remain exact.
+-fn hinted_layout_validation_error(instance: &SPInstance, prob: &SPProblem) -> Option<String> {
+-    let container_bbox = prob.layout.container.outer_cd.bbox;
+-    for placed in prob.layout.placed_items.values() {
+-        if placed.item_id >= instance.items.len() {
+-            return Some(format!("unknown hinted item {}", placed.item_id));
+-        }
+-        let item = instance.item(placed.item_id);
+-        if !rotation_range_allows(&item.allowed_rotation, placed.d_transf.rotation()) {
+-            return Some(format!(
+-                "hinted item {} uses a rotation outside its allowed orientations",
+-                placed.item_id
+-            ));
+-        }
+-        if !crate::structure::pipeline::bbox_is_contained_mm(
+-            [
+-                container_bbox.x_min,
+-                container_bbox.x_max,
+-                container_bbox.y_min,
+-                container_bbox.y_max,
+-            ],
+-            [
+-                placed.shape.bbox.x_min,
+-                placed.shape.bbox.x_max,
+-                placed.shape.bbox.y_min,
+-                placed.shape.bbox.y_max,
+-            ],
+-        ) {
+-            return Some(format!(
+-                "hinted item {} lies outside the strip boundary",
+-                placed.item_id
+-            ));
+-        }
+-    }
+-    let (_exterior, placed_items, other, first_pair) = flat_layout_collision_counts(&prob.layout);
+-    if placed_items != 0 || other != 0 {
+-        return Some(format!(
+-            "hinted layout has placed_item_collisions={placed_items}, other_collisions={other}, first_pair={first_pair:?}"
+-        ));
+-    }
+-    None
++fn hinted_layout_validation_error(
++    instance: &SPInstance,
++    prob: &SPProblem,
++    frozen: &[usize],
++) -> Option<String> {
++    crate::structure::pipeline::partial_solution_validation_error_with_frozen_ids(
++        instance,
++        &prob.save(),
++        frozen,
++    )
++    .map(|error| format!("{error:?}"))
+ }
+ 
+ fn rebuild_lane_from_frozen_hints(
+@@ -2530,6 +2583,16 @@
+     if required_width > frozen_prob.strip_width() {
+         frozen_prob.change_strip_width(required_width);
+     }
++    let boxes = hinted_placements
++        .iter()
++        .filter(|p| p.2)
++        .map(|&(item_id, dt, _)| {
++            let mut shape = instance.item(item_id).shape_cd.as_ref().clone();
++            shape.transform_from(&instance.item(item_id).shape_cd, &dt.compose());
++            shape.bbox
++        })
++        .collect::<Vec<_>>();
++    crate::util::frozen::prepare_placements(&mut frozen_prob, boxes);
+     for &(item_id, dt, frozen) in hinted_placements {
+         if frozen {
+             frozen_prob.place_item(SPPlacement {
+@@ -2538,7 +2601,15 @@
+             });
+         }
+     }
+-    if let Some(error) = hinted_layout_validation_error(instance, &frozen_prob) {
++    if let Some(error) = hinted_layout_validation_error(
++        instance,
++        &frozen_prob,
++        &hinted_placements
++            .iter()
++            .filter(|p| p.2)
++            .map(|p| p.0)
++            .collect::<Vec<_>>(),
++    ) {
+         return Err(format!("invalid frozen all_items baseline: {error}"));
+     }
+     construct(frozen_prob)
+@@ -2626,7 +2697,15 @@
+             })
+         })
+         .collect::<Result<Vec<_>, String>>()?;
+-    validate_group_geometry(&instance, &group_specs)?;
++    validate_group_geometry(
++        &instance,
++        &group_specs,
++        &input
++            .frozen_item_ids()
++            .iter()
++            .filter_map(|id| global_to_local.get(id).copied())
++            .collect::<Vec<_>>(),
++    )?;
+     let place_groups = PlaceGroups::new(&instance, group_specs)
+         .map_err(|e| format!("invalid lane place group: {e}"))?;
+ 
+@@ -2656,6 +2735,15 @@
+         if required_width > prob.strip_width() {
+             prob.change_strip_width(required_width);
+         }
++        let boxes = hinted_placements
++            .iter()
++            .map(|&(item_id, dt, _)| {
++                let mut shape = instance.item(item_id).shape_cd.as_ref().clone();
++                shape.transform_from(&instance.item(item_id).shape_cd, &dt.compose());
++                shape.bbox
++            })
++            .collect::<Vec<_>>();
++        crate::util::frozen::prepare_placements(&mut prob, boxes);
+         for &(item_id, dt, _) in &hinted_placements {
+             prob.place_item(SPPlacement {
+                 item_id,
+@@ -2682,14 +2770,21 @@
+         .prob)
+     };
+ 
+-    let warm_start_valid = hinted_layout_validation_error(&instance, &prob).is_none();
++    let warm_start_valid = hinted_layout_validation_error(&instance, &prob, &frozen_ids).is_none();
+     let mut prob = if warm_start_valid {
+         construct(prob)?
+     } else {
+         rebuild_lane_from_frozen_hints(&instance, &hinted_placements, &mut construct)?
+     };
+     let mut solution = prob.save();
+-    if solution_validation_error(&instance, &solution).is_some() && !hinted_placements.is_empty() {
++    if crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++        &instance,
++        &solution,
++        &frozen_ids,
++    )
++    .is_some()
++        && !hinted_placements.is_empty()
++    {
+         // A partial warm start can be collision-free itself yet lead to an
+         // invalid complete layout on the current Jagua path. Rebuild once from
+         // the authoritative frozen subset (or from an empty problem) so an
+@@ -2697,7 +2792,11 @@
+         prob = rebuild_lane_from_frozen_hints(&instance, &hinted_placements, &mut construct)?;
+         solution = prob.save();
+     }
+-    if let Some(error) = solution_validation_error(&instance, &solution) {
++    if let Some(error) = crate::structure::pipeline::solution_validation_error_with_frozen_ids(
++        &instance,
++        &solution,
++        &frozen_ids,
++    ) {
+         return Err(format!(
+             "failed to construct an exact-feasible lane baseline: {error:?}"
+         ));
+@@ -2729,8 +2828,15 @@
+ /// checked across the anchor's allowed discrete rotations; a continuous anchor
+ /// is left to LBF's full-member CDE evaluator. Only pairs within the same group
+ /// are checked here; overlaps between placement units are left to separation.
+-fn validate_group_geometry(instance: &SPInstance, groups: &[PlaceGroupSpec]) -> Result<(), String> {
++fn validate_group_geometry(
++    instance: &SPInstance,
++    groups: &[PlaceGroupSpec],
++    frozen: &[usize],
++) -> Result<(), String> {
+     for group in groups {
++        if group.members.iter().all(|m| frozen.contains(&m.item_id)) {
++            continue;
++        }
+         let shapes: Vec<(usize, SPolygon)> = group
+             .members
+             .iter()
+@@ -2827,25 +2933,6 @@
+         }
+         let mut shape = item.shape_cd.as_ref().clone();
+         shape.transform_from(&item.shape_cd, &dt.compose());
+-        let container_bbox = prob.layout.container.outer_cd.bbox;
+-        if !crate::structure::pipeline::bbox_is_contained_mm(
+-            [
+-                container_bbox.x_min,
+-                shape.bbox.x_max,
+-                container_bbox.y_min,
+-                container_bbox.y_max,
+-            ],
+-            [
+-                shape.bbox.x_min,
+-                shape.bbox.x_max,
+-                shape.bbox.y_min,
+-                shape.bbox.y_max,
+-            ],
+-        ) {
+-            return Err(format!(
+-                "invalid frozen prefix: item {global_id} lies outside the fixed strip boundary"
+-            ));
+-        }
+         required_width = required_width.max(shape.bbox.x_max);
+         placements.push(SPPlacement {
+             item_id: global_id as usize,
+@@ -2857,41 +2944,27 @@
+     if required_width > prob.strip_width() {
+         prob.change_strip_width(required_width);
+     }
++    let boxes = placements
++        .iter()
++        .map(|p| {
++            let mut shape = instance.item(p.item_id).shape_cd.as_ref().clone();
++            shape.transform_from(&instance.item(p.item_id).shape_cd, &p.d_transf.compose());
++            shape.bbox
++        })
++        .collect::<Vec<_>>();
++    crate::util::frozen::prepare_placements(&mut prob, boxes);
+     for placement in placements {
+         prob.place_item(placement);
+     }
+-    prob.fit_strip();
+-    let fitted_bbox = prob.layout.container.outer_cd.bbox;
+-    if let Some(outside) = prob.layout.placed_items.values().find(|placed| {
+-        !crate::structure::pipeline::bbox_is_contained_mm(
+-            [
+-                fitted_bbox.x_min,
+-                fitted_bbox.x_max,
+-                fitted_bbox.y_min,
+-                fitted_bbox.y_max,
+-            ],
+-            [
+-                placed.shape.bbox.x_min,
+-                placed.shape.bbox.x_max,
+-                placed.shape.bbox.y_min,
+-                placed.shape.bbox.y_max,
+-            ],
++    crate::util::frozen::fit_strip(&mut prob);
++    if let Some(error) =
++        crate::structure::pipeline::partial_solution_validation_error_with_frozen_ids(
++            instance,
++            &prob.save(),
++            &frozen.iter().map(|&id| id as usize).collect::<Vec<_>>(),
+         )
+-    }) {
+-        return Err(format!(
+-            "invalid frozen prefix: item {} lies outside the fitted strip boundary",
+-            outside.item_id
+-        ));
+-    }
+-    let (exterior, placed_items, other, first_pair) = flat_layout_collision_counts(&prob.layout);
+-    // Jagua treats exact contact with the rectangular strip boundary as an
+-    // exterior CDE hit. External hints at x=0/y=0 are valid in the public
+-    // contract, so bbox containment above is authoritative for the outer
+-    // boundary; pair and non-exterior hazards remain exact rejection causes.
+-    if placed_items != 0 || other != 0 {
+-        return Err(format!(
+-            "invalid frozen prefix: exterior_collisions={exterior}, placed_item_collisions={placed_items}, other_collisions={other}, first_pair={first_pair:?}"
+-        ));
++    {
++        return Err(format!("invalid frozen prefix: {error:?}"));
+     }
+     let right = prob
+         .layout
+@@ -3942,7 +4015,7 @@
+     }
+ 
+     #[test]
+-    fn structure_first_rejects_colliding_frozen_baseline() {
++    fn structure_first_accepts_colliding_frozen_baseline() {
+         let json = serde_json::json!({
+             "schema_version":2,
+             "nesting":{"mode":"all_items","group_workers":1,"quantum_ms":1,"locked_prefix_gap_mm":0.0},
+@@ -3954,10 +4027,8 @@
+         })
+         .to_string();
+         let input = parse_and_validate(&json).unwrap();
+-        let error = GroupedStepState::new(input, fast_structure_config())
+-            .err()
+-            .expect("colliding frozen baseline must fail during Init");
+-        assert!(error.contains("invalid frozen all_items baseline"));
++        let engine = GroupedStepState::new(input, fast_structure_config()).unwrap();
++        assert!(engine.export_certified_solution().is_ok());
+     }
+ 
+     #[test]
+--- a/swarm-core/src/eval/lbf_evaluator.rs
++++ b/swarm-core/src/eval/lbf_evaluator.rs
+@@ -43,6 +43,13 @@
+ /// edge/containment test per unordered pair to avoid query/hazard asymmetry.
+ pub fn flat_layout_collision_counts(
+     layout: &Layout,
++) -> (usize, usize, usize, Option<(usize, usize)>) {
++    flat_layout_collision_counts_with_frozen(layout, &[])
++}
++
++pub fn flat_layout_collision_counts_with_frozen(
++    layout: &Layout,
++    frozen: &[bool],
+ ) -> (usize, usize, usize, Option<(usize, usize)>) {
+     let cde = flat_exact_cde(layout);
+     let dynamic_hazards = layout
+@@ -67,7 +74,11 @@
+         cde.collect_poly_collisions(&placed.shape, &mut collisions);
+         for (_, entity) in collisions.iter() {
+             match entity {
+-                HazardEntity::Exterior => exterior += 1,
++                HazardEntity::Exterior => {
++                    if !crate::util::frozen::is_frozen(frozen, placed.item_id) {
++                        exterior += 1;
++                    }
++                }
+                 HazardEntity::PlacedItem { .. } => {}
+                 HazardEntity::Hole { .. } | HazardEntity::InferiorQualityZone { .. } => other += 1,
+             }
+@@ -76,6 +87,11 @@
+     let placed = layout.placed_items.values().collect::<Vec<_>>();
+     for (index, first) in placed.iter().enumerate() {
+         for second in placed.iter().skip(index + 1) {
++            if crate::util::frozen::is_frozen(frozen, first.item_id)
++                && crate::util::frozen::is_frozen(frozen, second.item_id)
++            {
++                continue;
++            }
+             if polygons_collide_bidirectionally(&first.shape, &second.shape) {
+                 placed_items += 1;
+                 first_placed_pair.get_or_insert((first.item_id, second.item_id));
+--- a/swarm-core/src/optimizer/compress.rs
++++ b/swarm-core/src/optimizer/compress.rs
+@@ -17,6 +17,12 @@
+     config: &CompressionConfig,
+ ) -> SPSolution {
+     let mut best_sol = init_sol.clone();
++    if sep
++        .min_feasible_width()
++        .is_some_and(|width| width >= init_sol.strip_width())
++    {
++        return best_sol;
++    }
+     let start = Instant::now();
+     let mut n_failed_attempts = 0;
+     let Some((shrink_start, shrink_stop)) = normalize_shrink_range(config.shrink_range) else {
+--- a/swarm-core/src/optimizer/lbf.rs
++++ b/swarm-core/src/optimizer/lbf.rs
+@@ -308,10 +308,7 @@
+                     }
+                 }
+                 let mut slots: Vec<Option<T>> = sorted_desc.into_iter().map(Some).collect();
+-                order
+-                    .into_iter()
+-                    .filter_map(|i| slots[i].take())
+-                    .collect()
++                order.into_iter().filter_map(|i| slots[i].take()).collect()
+             }
+         }
+     }
+@@ -524,7 +521,10 @@
+                     LbfOrderMode::SizeTimesConcavity => (size * (1.0 + concavity()), 0.0),
+                     _ => (size, 0.0),
+                 };
+-                (Reverse(OrderedFloat(primary)), Reverse(OrderedFloat(secondary)))
++                (
++                    Reverse(OrderedFloat(primary)),
++                    Reverse(OrderedFloat(secondary)),
++                )
+             })
+             .filter(|id| self.place_groups.is_representative(*id))
+             .collect_vec();
+@@ -593,7 +593,7 @@
+                 self.construct_structure_first(sorted_item_indices, &mut observed_stop);
+             }
+             if !self.prob.layout.placed_items.is_empty() {
+-                self.prob.fit_strip();
++                crate::util::frozen::fit_strip(&mut self.prob);
+             }
+             let completed = self.prob.item_demand_qtys.iter().all(|qty| *qty == 0);
+             let density = self.prob.density();
+@@ -649,7 +649,7 @@
+         // placed. Returning that empty partial problem is part of the
+         // cancellable API contract; `fit_strip` requires a non-empty layout.
+         if !self.prob.layout.placed_items.is_empty() {
+-            self.prob.fit_strip();
++            crate::util::frozen::fit_strip(&mut self.prob);
+         }
+         debug!(
+             "[CONSTR] placed all items in width: {:.3} (in {:?})",
+@@ -1336,7 +1336,7 @@
+         if let Some(stats) = self.structure_stats.as_mut() {
+             stats.start.strip_expansions += 1;
+         }
+-        self.prob.change_strip_width(next_width);
++        crate::util::frozen::change_strip_width(&mut self.prob, next_width);
+         #[cfg(feature = "capmods")]
+         self.init_raster();
+         if let Some(config) = self.profile_cfg {
+@@ -1426,7 +1426,8 @@
+                     "[CONSTR] failed to place item with id {}, expanding strip width",
+                     item_id
+                 );
+-                self.prob.change_strip_width(self.prob.strip_width() * 1.2);
++                let width = self.prob.strip_width() * 1.2;
++                crate::util::frozen::change_strip_width(&mut self.prob, width);
+                 assert!(
+                     assertions::strip_width_is_in_check(&self.prob),
+                     "strip-width is running away (>{:.3}), item {item_id} does not seem to fit into the strip",
+@@ -1888,7 +1889,10 @@
+     /// "오목한 것부터" 가 조용히 "오목한 것 나중에" 가 된다.
+     #[test]
+     fn concavity_modes_keep_the_sorted_order() {
+-        for mode in [LbfOrderMode::ConcavityFirst, LbfOrderMode::SizeTimesConcavity] {
++        for mode in [
++            LbfOrderMode::ConcavityFirst,
++            LbfOrderMode::SizeTimesConcavity,
++        ] {
+             assert_eq!(mode.arrange(desc(9)), desc(9), "{mode:?}");
+         }
+     }
+--- a/swarm-core/src/optimizer/reclaim.rs
++++ b/swarm-core/src/optimizer/reclaim.rs
+@@ -306,7 +306,12 @@
+         // 인증기는 실행 가능성만 보고 폭은 보지 않는다. 좁아졌을 때만 받는다.
+         let improved = polished.strip_width() < best.strip_width()
+             && crate::util::assertions::frozen_poses_preserved(&best, &polished, &sep.frozen_mask)
+-            && crate::structure::pipeline::solution_validation_error(instance, &polished).is_none();
++            && crate::structure::pipeline::solution_validation_error_with_frozen(
++                instance,
++                &polished,
++                &sep.frozen_mask,
++            )
++            .is_none();
+         if improved {
+             info!(
+                 "[RECLAIM] 사이클 {cycle}: {:.3} -> {:.3} ({:+.3}mm)",
+--- a/swarm-core/src/optimizer/separator.rs
++++ b/swarm-core/src/optimizer/separator.rs
+@@ -274,18 +274,16 @@
+         self.ct = CollisionTracker::new_with_frozen(&self.prob.layout, &self.frozen_mask);
+     }
+ 
+-    /// 고정 아이템들의 우측 끝(x_max) 중 최대값.
+-    /// 고정 아이템은 절대 좌표가 유지되므로, strip 폭이 이 값보다 작아지면
+-    /// 경계 침범 충돌이 발생하고 이는 어떤 이동으로도 해결할 수 없다.
+-    /// 고정 아이템이 없으면 `None`.
++    /// User locks may extend outside the strip and impose no width floor.
+     pub fn min_feasible_width(&self) -> Option<f32> {
++        // With no movable placement there is nothing to optimize. Retaining
++        // the current positive width also avoids unlimited empty-strip shrink.
+         self.prob
+             .layout
+             .placed_items
+-            .iter()
+-            .filter(|(_, pi)| self.frozen_mask.get(pi.item_id).copied().unwrap_or(false))
+-            .map(|(_, pi)| pi.shape.bbox.x_max)
+-            .max_by_key(|&x| OrderedFloat(x))
++            .values()
++            .all(|p| crate::util::frozen::is_frozen(&self.frozen_mask, p.item_id))
++            .then_some(self.prob.strip_width())
+     }
+ 
+     /// Algorithm 9 from https://doi.org/10.48550/arXiv.2509.13329
+@@ -525,7 +523,7 @@
+     pub fn rollback(&mut self, sol: &SPSolution, ots: Option<&CTSnapshot>) {
+         // SPProblem::restore installs the target container and layout together.
+         // Shrinking the old layout first can strand frozen items outside the CDE.
+-        self.prob.restore(sol);
++        crate::util::frozen::restore(&mut self.prob, sol);
+ 
+         match ots {
+             Some(ots) => {
+@@ -622,7 +620,7 @@
+         split_position: Option<f32>,
+         should_stop: &mut dyn FnMut() -> bool,
+     ) -> bool {
+-        if should_stop() {
++        if !new_width.is_finite() || new_width <= 0.0 || should_stop() {
+             return false;
+         }
+         let split_position = split_position.unwrap_or(self.prob.strip_width() / 2.0);
+@@ -678,7 +676,7 @@
+             self.rollback(&saved, None);
+             return false;
+         }
+-        self.prob.change_strip_width(new_width);
++        crate::util::frozen::change_strip_width(&mut self.prob, new_width);
+         self.resync();
+         debug!("[SEP] changed strip width to {:.3}", new_width);
+         true
+@@ -689,14 +687,25 @@
+     /// 이미 feasible한 배치를 그대로 둔 채 남는 폭만 회수할 때 사용한다.
+     /// 폭이 실제로 바뀐 경우 `true`를 반환한다.
+     pub fn refit_strip(&mut self) -> bool {
+-        if self.prob.layout.placed_items.is_empty() || !self.prob.layout.is_feasible() {
+-            // The tracker excludes frozen/frozen loss and collision queries can
+-            // be asymmetric at tangencies. fit_strip requires a feasible layout;
+-            // never use a container resize to hide a failed placement check.
++        if self.prob.layout.placed_items.is_empty() {
+             return false;
+         }
++        // Retain the existing fast path when no lock needs an exception.
++        let feasible = if self.frozen_mask.iter().any(|&locked| locked) {
++            crate::structure::pipeline::solution_validation_error_with_frozen(
++                &self.instance,
++                &self.prob.save(),
++                &self.frozen_mask,
++            )
++            .is_none()
++        } else {
++            self.prob.layout.is_feasible()
++        };
++        if !feasible {
++            return false;
++        }
+         let before = self.prob.strip_width();
+-        self.prob.fit_strip();
++        crate::util::frozen::fit_strip_with_frozen(&mut self.prob, &self.frozen_mask);
+         let after = self.prob.strip_width();
+         if after == before {
+             return false;
+--- a/swarm-core/src/optimizer/worker.rs
++++ b/swarm-core/src/optimizer/worker.rs
+@@ -97,7 +97,7 @@
+ 
+ impl SeparatorWorker {
+     pub fn load(&mut self, sol: &SPSolution, ct: &CollisionTracker) {
+-        self.prob.restore(sol);
++        crate::util::frozen::restore(&mut self.prob, sol);
+         // clone() 대신 버퍼 재사용 복사 — 매 iteration마다 O(n²) 재할당을 피한다
+         self.ct.copy_from(ct);
+     }
+--- a/swarm-core/src/optimizer/polish/lp.rs
++++ b/swarm-core/src/optimizer/polish/lp.rs
+@@ -309,21 +309,10 @@
+     // I-04: 하한을 상대 변위 상한(2√2·trust)에 맞춘다.
+     let clearance = trust * cfg.clearance_factor.max(MIN_CLEARANCE_FACTOR);
+ 
+-    // 1. 변수 — 고정 아이템은 움직일 수 없으므로 폭의 하한이 된다.
+-    let frozen_x_max = sep
+-        .prob
+-        .layout
+-        .placed_items
+-        .iter()
+-        .filter(|(_, pi)| sep.frozen_mask.get(pi.item_id).copied().unwrap_or(false))
+-        .map(|(_, pi)| OrderedFloat(pi.shape.bbox.x_max))
+-        .max()
+-        .map(|v| v.0)
+-        .unwrap_or(0.0);
+-
+-    let w_lower = f32::max(frozen_x_max, width_before - trust);
++    // Frozen poses remain fixed but are permitted outside the physical strip.
++    let w_lower = (width_before - trust).max(f32::EPSILON);
+     if w_lower >= width_before {
+-        // 고정 아이템이 폭을 이미 결정하고 있다. 신뢰 영역을 키우면 달라질 수 있다.
++        // No positive representable width decrease in this trust region.
+         return IterOutcome::NoImprovement;
+     }
+ 
+@@ -1141,14 +1130,7 @@
+             "가변끼리의 접촉 행이 없다 — 양쪽에 계수가 붙는 분기가 안 돈다"
+         );
+ 
+-        let frozen_x_max = items
+-            .iter()
+-            .filter(|it| it.frozen)
+-            .map(|it| OrderedFloat(it.bbox.x_max))
+-            .max()
+-            .map(|v| v.0)
+-            .unwrap_or(0.0);
+-        let w_lower = f32::max(frozen_x_max, width_before - trust);
++        let w_lower = (width_before - trust).max(f32::EPSILON);
+         let n_movable = items.iter().filter(|it| !it.frozen).count();
+         let pull = (cfg.left_pull_weight / n_movable as f32) as f64;
+ 
+--- a/swarm-core/src/optimizer/polish/mod.rs
++++ b/swarm-core/src/optimizer/polish/mod.rs
+@@ -240,7 +240,12 @@
+         }
+     }
+ 
+-    if crate::structure::pipeline::solution_validation_error(instance, &best_sol).is_some()
++    if crate::structure::pipeline::solution_validation_error_with_frozen(
++        instance,
++        &best_sol,
++        &sep.frozen_mask,
++    )
++    .is_some()
+         || !crate::util::assertions::frozen_poses_preserved(init_sol, &best_sol, &sep.frozen_mask)
+     {
+         best_sol = init_sol.clone();
+--- a/swarm-core/src/structure/pipeline.rs
++++ b/swarm-core/src/structure/pipeline.rs
+@@ -9,7 +9,6 @@
+     ShrinkDecayStrategy,
+ };
+ use crate::consts::LBF_SAMPLE_CONFIG;
+-use crate::eval::lbf_evaluator::flat_layout_collision_counts;
+ use crate::optimizer::compress::compression_phase;
+ #[cfg(not(feature = "adaptive"))]
+ use crate::optimizer::explore::exploration_phase;
+@@ -394,6 +393,37 @@
+     >,
+ ) -> Result<(SPSolution, StructureRunReport), StructurePipelineFailure> {
+     let config = structure_config.clone().sanitized();
++    let frozen_mask = crate::util::frozen::mask(instance.items.len(), frozen_item_ids);
++    let solution_is_valid = |instance: &SPInstance, solution: &SPSolution| {
++        solution_validation_error_with_frozen(instance, solution, &frozen_mask).is_none()
++    };
++    let consider_incumbent = |instance: &SPInstance,
++                              incumbent: &mut SPSolution,
++                              candidate: &SPSolution| {
++        if !solution_is_valid(instance, candidate)
++            || !crate::util::assertions::frozen_poses_preserved(incumbent, candidate, &frozen_mask)
++        {
++            return false;
++        }
++        if !solution_is_valid(instance, incumbent)
++            || candidate.strip_width() + 1.0e-5 < incumbent.strip_width()
++        {
++            *incumbent = candidate.clone();
++            true
++        } else {
++            false
++        }
++    };
++    let consider_p5_incumbent = |instance: &SPInstance,
++                                 incumbent: &mut SPSolution,
++                                 candidate: &SPSolution,
++                                 best_stage: &mut StructureStage| {
++        let improved = consider_incumbent(instance, incumbent, candidate);
++        if improved {
++            *best_stage = StructureStage::P5Finish;
++        }
++        improved
++    };
+     let started = Instant::now();
+     let mut report = StructureRunReport::new();
+     let profile_cfg = profile_config(&instance, &config);
+@@ -799,10 +829,10 @@
+     } else {
+         incumbent.clone()
+     };
+-    p2_prob.restore(&p2_for_p3);
++    crate::util::frozen::restore(&mut p2_prob, &p2_for_p3);
+     let slack_width = p2_for_p3.strip_width() * (1.0 + config.p3_slack_ratio);
+     if slack_width > p2_prob.strip_width() {
+-        p2_prob.change_strip_width(slack_width);
++        crate::util::frozen::change_strip_width(&mut p2_prob, slack_width);
+     }
+     let mut p3_cfg = *expl_config;
+     if let Some(limit) = config.p3_time_limit {
+@@ -1162,7 +1192,7 @@
+ 
+ fn restored_problem(instance: &SPInstance, solution: &SPSolution) -> SPProblem {
+     let mut problem = SPProblem::new(instance.clone());
+-    problem.restore(solution);
++    crate::util::frozen::restore(&mut problem, solution);
+     problem
+ }
+ 
+@@ -1172,6 +1202,7 @@
+         .min_by(|a, b| a.strip_width().total_cmp(&b.strip_width()))
+ }
+ 
++#[cfg(test)]
+ fn consider_incumbent(
+     instance: &SPInstance,
+     incumbent: &mut SPSolution,
+@@ -1190,6 +1221,7 @@
+     }
+ }
+ 
++#[cfg(test)]
+ fn consider_p5_incumbent(
+     instance: &SPInstance,
+     incumbent: &mut SPSolution,
+@@ -1207,7 +1239,7 @@
+     instance: &SPInstance,
+     solution: &SPSolution,
+ ) -> Option<P1ValidationError> {
+-    solution_validation_error_with_quantity_policy(instance, solution, true)
++    solution_validation_error_with_quantity_policy(instance, solution, true, &[])
+ }
+ 
+ /// Validate a partial seed layout. Missing demand is allowed because LBF will
+@@ -1217,13 +1249,47 @@
+     instance: &SPInstance,
+     solution: &SPSolution,
+ ) -> Option<P1ValidationError> {
+-    solution_validation_error_with_quantity_policy(instance, solution, false)
++    solution_validation_error_with_quantity_policy(instance, solution, false, &[])
++}
++
++pub fn solution_validation_error_with_frozen(
++    instance: &SPInstance,
++    solution: &SPSolution,
++    frozen: &[bool],
++) -> Option<P1ValidationError> {
++    solution_validation_error_with_quantity_policy(instance, solution, true, frozen)
++}
++
++pub fn solution_validation_error_with_frozen_ids(
++    instance: &SPInstance,
++    solution: &SPSolution,
++    ids: &[usize],
++) -> Option<P1ValidationError> {
++    solution_validation_error_with_frozen(
++        instance,
++        solution,
++        &crate::util::frozen::mask(instance.items.len(), ids),
++    )
++}
++
++pub fn partial_solution_validation_error_with_frozen_ids(
++    instance: &SPInstance,
++    solution: &SPSolution,
++    ids: &[usize],
++) -> Option<P1ValidationError> {
++    solution_validation_error_with_quantity_policy(
++        instance,
++        solution,
++        false,
++        &crate::util::frozen::mask(instance.items.len(), ids),
++    )
+ }
+ 
+ fn solution_validation_error_with_quantity_policy(
+     instance: &SPInstance,
+     solution: &SPSolution,
+     require_complete: bool,
++    frozen: &[bool],
+ ) -> Option<P1ValidationError> {
+     let mut counts = vec![0usize; instance.items.len()];
+     for (_, placed) in solution.layout_snapshot.placed_items.iter() {
+@@ -1233,6 +1299,18 @@
+             });
+         };
+         *count += 1;
++        let (x, y) = placed.d_transf.translation();
++        if !x.is_finite() || !y.is_finite() || !placed.d_transf.rotation().is_finite() {
++            return Some(P1ValidationError::LayoutInfeasible {
++                standard_feasible: false,
++                flat_exact_feasible: false,
++                exterior_collisions: 1,
++                placed_item_collisions: 0,
++                other_collisions: 0,
++                first_query_item_id: Some(placed.item_id),
++                first_hazard_item_id: None,
++            });
++        }
+         let allowed = match &instance.item(placed.item_id).allowed_rotation {
+             RotationRange::None => angular_distance(placed.d_transf.rotation(), 0.0) <= 1.0e-5,
+             RotationRange::Continuous => true,
+@@ -1284,14 +1362,22 @@
+         container_bbox.y_max,
+     ];
+     let mut exterior_collisions = 0usize;
++    let mut boxes = Vec::with_capacity(solution.layout_snapshot.placed_items.len());
+     for placed in solution.layout_snapshot.placed_items.values() {
+         let item = instance.item(placed.item_id);
+         let shape = item.shape_cd.transform_clone(&placed.d_transf.compose());
+         let bbox = shape.bbox;
+-        if !bbox_is_contained_mm(
+-            container_bounds,
+-            [bbox.x_min, bbox.x_max, bbox.y_min, bbox.y_max],
+-        ) {
++        boxes.push(bbox);
++        if !placed.d_transf.rotation().is_finite()
++            || ![bbox.x_min, bbox.x_max, bbox.y_min, bbox.y_max]
++                .iter()
++                .all(|v| v.is_finite())
++            || (!crate::util::frozen::is_frozen(frozen, placed.item_id)
++                && !bbox_is_contained_mm(
++                    container_bounds,
++                    [bbox.x_min, bbox.x_max, bbox.y_min, bbox.y_max],
++                ))
++        {
+             exterior_collisions += 1;
+         }
+     }
+@@ -1306,6 +1392,7 @@
+             first_hazard_item_id: None,
+         });
+     }
++    crate::util::frozen::prepare_placements(&mut rebuilt, boxes);
+     for placed in solution.layout_snapshot.placed_items.values() {
+         rebuilt.place_item(SPPlacement {
+             item_id: placed.item_id,
+@@ -1315,7 +1402,7 @@
+     let layout = &rebuilt.layout;
+     let standard_feasible = layout.is_feasible();
+     let (exterior_collisions, placed_item_collisions, other_collisions, first_placed_pair) =
+-        flat_layout_collision_counts(layout);
++        crate::eval::lbf_evaluator::flat_layout_collision_counts_with_frozen(layout, frozen);
+     // Jagua's exterior hazard treats exact contact with a rectangular strip
+     // boundary as a collision. The public hint contract permits x=0/y=0/top
+     // contact, so bbox containment is authoritative for the strip exterior;
+@@ -1323,7 +1410,7 @@
+     // causes.
+     let flat_exact_feasible = placed_item_collisions == 0 && other_collisions == 0;
+     if flat_exact_feasible {
+-        if !standard_feasible {
++        if !standard_feasible && !frozen.iter().any(|&locked| locked) {
+             warn!(
+                 "[STRUCT:VALIDATE] quadtree reported a collision rejected by depth-zero exact validation"
+             );
+--- /dev/null
++++ b/swarm-core/src/util/frozen.rs
+@@ -0,0 +1,141 @@
++//! User locks remain obstacles, but lock/lock and lock/exterior conflicts are
++//! permitted. The spatial index may extend beyond the physical strip.
++use jagua_rs::collision_detection::CDEngine;
++use jagua_rs::entities::Container;
++use jagua_rs::geometry::primitives::Rect;
++use jagua_rs::probs::spp::entities::{SPProblem, SPSolution};
++use std::sync::Arc;
++
++pub fn mask(size: usize, ids: &[usize]) -> Vec<bool> {
++    let mut result = vec![false; size];
++    for &id in ids {
++        if let Some(value) = result.get_mut(id) {
++            *value = true;
++        }
++    }
++    result
++}
++
++pub fn is_frozen(mask: &[bool], id: usize) -> bool {
++    mask.get(id).copied().unwrap_or(false)
++}
++
++fn include(root: &mut Rect, bbox: Rect) {
++    root.x_min = root.x_min.min(bbox.x_min);
++    root.y_min = root.y_min.min(bbox.y_min);
++    root.x_max = root.x_max.max(bbox.x_max);
++    root.y_max = root.y_max.max(bbox.y_max);
++}
++
++fn expand(container: &mut Container, boxes: impl IntoIterator<Item = Rect>) -> bool {
++    let original = container.base_cde.bbox();
++    let mut root = original;
++    for bbox in boxes {
++        include(&mut root, bbox);
++    }
++    if root == original {
++        return false;
++    }
++    // This only changes index coverage. Exterior geometry and CDE configuration
++    // stay identical, so movable pieces still see the original strip boundary.
++    let source = &container.base_cde;
++    container.base_cde = Arc::new(CDEngine::new(
++        root.inflate_to_square(),
++        source.hazards().cloned().collect(),
++        source.config,
++    ));
++    true
++}
++
++pub fn prepare_placements(prob: &mut SPProblem, boxes: impl IntoIterator<Item = Rect>) {
++    let mut container = prob.layout.container.clone();
++    if expand(&mut container, boxes) {
++        prob.layout.swap_container(container);
++    }
++}
++
++pub fn change_strip_width(prob: &mut SPProblem, width: f32) {
++    prob.strip.set_width(width);
++    let mut container: Container = prob.strip.into();
++    expand(
++        &mut container,
++        prob.layout.placed_items.values().map(|p| p.shape.bbox),
++    );
++    prob.layout.swap_container(container);
++}
++
++pub fn restore(prob: &mut SPProblem, solution: &SPSolution) {
++    if prob.strip == solution.strip
++        && prob.layout.container.base_cde.bbox()
++            != solution.layout_snapshot.container.base_cde.bbox()
++    {
++        prob.layout = jagua_rs::entities::Layout::from_snapshot(&solution.layout_snapshot);
++    }
++    prob.restore(solution);
++}
++
++/// Equivalent fitting arithmetic without requiring exempt locks to become
++/// physically feasible. Empty/all-left layouts retain a positive strip width.
++pub fn fit_strip(prob: &mut SPProblem) {
++    fit_strip_with_frozen(prob, &[]);
++}
++
++pub fn fit_strip_with_frozen(prob: &mut SPProblem, frozen: &[bool]) {
++    if let Some(right) = prob
++        .layout
++        .placed_items
++        .values()
++        .filter(|p| !is_frozen(frozen, p.item_id))
++        .map(|p| p.shape.bbox.x_max)
++        .reduce(f32::max)
++    {
++        let width = right * 1.00001 + prob.strip.shape_modify_config.offset.unwrap_or(0.0);
++        if width.is_finite() && width > 0.0 {
++            change_strip_width(prob, width);
++        }
++    }
++}
++
++/// Rebuild an already validated public solution without importing its locks
++/// into an index restricted to the strip rectangle.
++pub fn import_solution(
++    instance: &jagua_rs::probs::spp::entities::SPInstance,
++    solution: &jagua_rs::probs::spp::io::ext_repr::ExtSPSolution,
++) -> SPProblem {
++    use jagua_rs::entities::Instance;
++    use jagua_rs::geometry::{DTransformation, geo_traits::Transformable};
++    use jagua_rs::probs::spp::entities::SPPlacement;
++    let mut prob = SPProblem::new(instance.clone());
++    change_strip_width(&mut prob, solution.strip_width);
++    let placements = solution
++        .layout
++        .placed_items
++        .iter()
++        .map(|placed| {
++            let item_id = placed.item_id as usize;
++            let dt = jagua_rs::io::import::ext_to_int_transformation(
++                &DTransformation::from(placed.transformation.clone()),
++                &instance.item(item_id).shape_orig.pre_transform,
++            );
++            SPPlacement {
++                item_id,
++                d_transf: dt,
++            }
++        })
++        .collect::<Vec<_>>();
++    let boxes = placements
++        .iter()
++        .map(|p| {
++            instance
++                .item(p.item_id)
++                .shape_cd
++                .transform_clone(&p.d_transf.compose())
++                .bbox
++        })
++        .collect::<Vec<_>>();
++    prepare_placements(&mut prob, boxes);
++    for placement in placements {
++        prob.place_item(placement);
++    }
++    prob
++}
+--- a/swarm-core/src/util/mod.rs
++++ b/swarm-core/src/util/mod.rs
+@@ -1,9 +1,10 @@
+ pub mod assertions;
++pub mod frozen;
+ 
+ pub mod bit_reversal_iterator;
+ pub mod io;
++pub mod listener;
+ pub mod simplify_mm;
+-pub mod listener;
+ pub mod terminator;
+ 
+ #[cfg(not(target_arch = "wasm32"))]
+--- /dev/null
++++ b/tests/frozen_policy.rs
+@@ -0,0 +1,241 @@
++//! Public lock exceptions must agree at Init, every phase, diagnostics and export.
++use capswarmcore_100::ffi::{CSwarmConfig, swarm_free_string, swarm_get_default_config};
++use capswarmcore_100::ffi_step::*;
++use std::ffi::{CStr, CString, c_char, c_void};
++use std::sync::Mutex;
++
++extern "C" fn callback(_: i32, _: f32, _: f32, json: *const c_char, user: *mut c_void) {
++    if !json.is_null() {
++        let output = unsafe { &*(user as *const Mutex<Vec<String>>) };
++        if let Ok(mut output) = output.lock() {
++            output.push(
++                unsafe { CStr::from_ptr(json) }
++                    .to_string_lossy()
++                    .into_owned(),
++            );
++        }
++    }
++}
++
++fn read_json(ptr: *mut c_char) -> serde_json::Value {
++    assert!(!ptr.is_null(), "{}", last_error());
++    let text = unsafe { CStr::from_ptr(ptr) }
++        .to_string_lossy()
++        .into_owned();
++    swarm_free_string(ptr);
++    serde_json::from_str(&text).unwrap()
++}
++
++fn last_error() -> String {
++    let ptr = swarm_get_last_error_message();
++    if ptr.is_null() {
++        return String::new();
++    }
++    let s = unsafe { CStr::from_ptr(ptr) }
++        .to_string_lossy()
++        .into_owned();
++    swarm_free_string(ptr);
++    s
++}
++
++fn assert_locks(solution: &serde_json::Value, xy: (f64, f64), lock_count: usize) {
++    let placed = solution["layout"]["placed_items"].as_array().unwrap();
++    assert_eq!(placed.len(), 3);
++    for id in 0..lock_count as u64 {
++        let p = placed
++            .iter()
++            .find(|p| p["item_id"].as_u64() == Some(id))
++            .unwrap();
++        let t = &p["transformation"]["translation"];
++        assert!((t[0].as_f64().unwrap() - xy.0).abs() < 0.001, "{p}");
++        assert!((t[1].as_f64().unwrap() - xy.1).abs() < 0.001, "{p}");
++        assert_eq!(p["transformation"]["rotation"].as_f64().unwrap(), 0.0);
++    }
++}
++
++fn run(mode: &str, xy: (f64, f64), structure: bool, grouped_locks: bool) {
++    run_frozen_count(mode, xy, structure, grouped_locks, 2)
++}
++
++fn run_frozen_count(
++    mode: &str,
++    xy: (f64, f64),
++    structure: bool,
++    grouped_locks: bool,
++    lock_count: usize,
++) {
++    eprintln!("case {mode} {xy:?} structure={structure}");
++    let items=(0..3).map(|id| {
++        let mut p=serde_json::json!({"id":id,"demand":1,"allowed_orientations":[0.0],
++            "shape":{"type":"rectangle","data":{"x_min":0.0,"y_min":0.0,"width":4.0,"height":4.0}}});
++        if id<lock_count {p["placed_hint"]=serde_json::json!({"item_id":id,"is_freeze":1,
++            "tr_x":xy.0,"tr_y":xy.1,"rot_angle_in_rad":0.0,"stripe_interval_y":0.0,"stripe_interval_x":0.0});}
++        p
++    }).collect::<Vec<_>>();
++    let instance = serde_json::json!({"name":"frozen-policy","strip_height":20.0,"items":items});
++    let json = if mode == "legacy" {
++        instance
++    } else {
++        serde_json::json!({"schema_version":2,
++        "nesting":{"mode":mode,"group_workers":2,"quantum_ms":5,"locked_prefix_gap_mm":0.0},
++        "instance":instance,"regions":if mode=="size_regions" {serde_json::json!([
++            {"id":"all","kind":"size_group","item_ids":[0,1,2],"gap_after_mm":0.0}])} else {serde_json::json!([])},
++        "place_groups":if grouped_locks {serde_json::json!([{"id":7,"member_item_ids":[0,1]}])} else {serde_json::json!([])}})
++    };
++    let mut cfg: CSwarmConfig = unsafe { std::mem::zeroed() };
++    swarm_get_default_config(&mut cfg);
++    // Test-only budgets; production configuration/defaults remain unchanged.
++    cfg.rng_seed = 17;
++    cfg.exploration.time_limit_secs = 0.03;
++    cfg.compression.time_limit_secs = 0.03;
++    cfg.polish.time_limit_secs = 0.03;
++    cfg.structure_first.enabled = 1;
++    cfg.structure_first.p1_time_limit_secs = 0.05;
++    cfg.structure_first.p2_time_limit_secs = 0.03;
++    cfg.structure_first.p3_time_limit_secs = 0.03;
++    cfg.structure_first.p4_cycles = 0;
++    cfg.initial_placement.enabled = 1;
++    cfg.initial_placement.time_limit_secs = 0.1;
++    let text = CString::new(json.to_string()).unwrap();
++    let hints = (0..lock_count as i32)
++        .map(|item_id| CPlacedHint {
++            item_id,
++            is_freeze: 1,
++            tr_x: xy.0 as f32,
++            tr_y: xy.1 as f32,
++            rot_angle_in_rad: 0.0,
++            stripe_interval_x: 0.0,
++            stripe_interval_y: 0.0,
++        })
++        .collect::<Vec<_>>();
++    let handle = swarm_init_from_json(
++        text.as_ptr(),
++        &cfg,
++        if mode == "legacy" {
++            hints.as_ptr()
++        } else {
++            std::ptr::null()
++        },
++        if mode == "legacy" {
++            lock_count as i32
++        } else {
++            0
++        },
++    );
++    assert!(!handle.is_null(), "{mode} {xy:?}: {}", last_error());
++    assert_locks(
++        &read_json(swarm_get_solution_json(handle)),
++        xy,
++        lock_count,
++    );
++    let capture = Mutex::new(Vec::<String>::new());
++    swarm_set_callback(
++        handle,
++        Some(callback),
++        &capture as *const _ as *mut c_void,
++        1,
++    );
++    if mode == "legacy" && xy == (5.0, 5.0) && !structure {
++        assert_eq!(swarm_initial_phase(handle), 0, "{}", last_error());
++        assert_locks(
++            &read_json(swarm_get_solution_json(handle)),
++            xy,
++            lock_count,
++        );
++    }
++    if structure {
++        assert_eq!(swarm_structure_phase(handle), 0, "{}", last_error());
++    } else {
++        for phase in [
++            swarm_explore_phase,
++            swarm_compress_phase,
++            swarm_polish_phase,
++        ] {
++            assert_eq!(phase(handle), 0, "{mode} {xy:?}: {}", last_error());
++            assert_locks(
++                &read_json(swarm_get_solution_json(handle)),
++                xy,
++                lock_count,
++            );
++            let status = read_json(swarm_get_collision_status_json(handle));
++            assert!(
++                status
++                    .as_array()
++                    .unwrap()
++                    .iter()
++                    .all(|s| s["collision"] == false),
++                "{status}"
++            );
++        }
++    }
++    assert_locks(
++        &read_json(swarm_get_solution_json(handle)),
++        xy,
++        lock_count,
++    );
++    let mut count = 0;
++    let statuses = swarm_get_collision_status(handle, &mut count);
++    assert!(!statuses.is_null());
++    assert_eq!(count, 3);
++    assert!(
++        unsafe { std::slice::from_raw_parts(statuses, count) }
++            .iter()
++            .all(|s| s.collision == 0)
++    );
++    swarm_free_collision_status(statuses, count);
++    let bounds = [0, 1].map(|item_id| CItemBounds {
++        item_id,
++        min_x: xy.0 as f32,
++        min_y: xy.1 as f32,
++        max_x: xy.0 as f32 + 4.0,
++        max_y: xy.1 as f32 + 4.0,
++    });
++    let conflicts = swarm_find_bound_collisions(handle, bounds.as_ptr(), 2);
++    assert!(conflicts.is_null());
++    let payloads = capture.lock().unwrap();
++    assert!(!payloads.is_empty());
++    for text in payloads.iter() {
++        let value: serde_json::Value = serde_json::from_str(text).unwrap();
++        assert_locks(&value["solution"], xy, lock_count);
++        assert_eq!(value["loss"].as_f64(), Some(0.0), "{value}");
++        assert!(
++            value["collision_status"]
++                .as_array()
++                .unwrap()
++                .iter()
++                .all(|s| s["collision"] == false)
++        );
++    }
++    swarm_free(handle);
++}
++
++#[test]
++fn frozen_policy_all_public_phases() {
++    for mode in ["legacy", "all_items", "size_regions"] {
++        for xy in [(5.0, 5.0), (-1000.0, -1000.0), (5.0, 1000.0), (1000.0, 5.0)] {
++            run(mode, xy, false, false);
++        }
++    }
++}
++
++#[test]
++fn frozen_policy_overlapping_locked_place_group() {
++    run("all_items", (-2.0, 18.0), false, true);
++}
++
++#[cfg(feature = "structure-first")]
++#[test]
++fn frozen_policy_structure_phases() {
++    for mode in ["legacy", "all_items", "size_regions"] {
++        run(mode, (-1000.0, -1000.0), true, false);
++        run(mode, (1000.0, 5.0), true, false);
++    }
++}
++
++#[test]
++fn frozen_policy_all_items_locked() {
++    for mode in ["legacy", "all_items", "size_regions"] {
++        run_frozen_count(mode, (-1000.0, -1000.0), false, false, 3);
++        run_frozen_count(mode, (1000.0, 5.0), false, false, 3);
++    }
++}
+--- a/tests/grouped_ffi.rs
++++ b/tests/grouped_ffi.rs
+@@ -1109,23 +1109,10 @@
+     let mut off_angle = hinted_item(0, true, 10.0, 10.0);
+     off_angle["allowed_orientations"] = serde_json::json!([0.0]);
+     off_angle["placed_hint"]["rot_angle_in_rad"] = serde_json::json!(std::f32::consts::FRAC_PI_2);
+-    let cases = vec![
+-        (
+-            "overlapping frozen items",
+-            vec![
+-                hinted_item(0, true, 5.0, 1.0),
+-                hinted_item(1, true, 5.0, 1.0),
+-            ],
+-        ),
+-        (
+-            "frozen item outside strip height",
+-            vec![hinted_item(0, true, 0.0, 20.0), item(1, false, 0.0)],
+-        ),
+-        (
+-            "frozen item outside allowed rotations",
+-            vec![off_angle, item(1, false, 0.0)],
+-        ),
+-    ];
++    let cases = vec![(
++        "frozen item outside allowed rotations",
++        vec![off_angle, item(1, false, 0.0)],
++    )];
+ 
+     for (case, items) in cases {
+         let handle = init(serde_json::json!({
+--- a/tests/warm_start.rs
++++ b/tests/warm_start.rs
+@@ -74,6 +74,20 @@
+     let s = unsafe { CStr::from_ptr(p) }.to_str().unwrap().to_owned();
+     swarm_free_string(p);
+     s
++}
++
++fn item_poses(json: &str, id: u64) -> Vec<String> {
++    let value: serde_json::Value = serde_json::from_str(json).unwrap();
++    let mut poses = value["layout"]["placed_items"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .filter(|p| p["item_id"].as_u64() == Some(id))
++        .map(|p| p["transformation"].to_string())
++        .collect::<Vec<_>>();
++    assert!(!poses.is_empty());
++    poses.sort();
++    poses
+ }
+ 
+ fn strip_width(json: &str) -> f32 {
+@@ -168,6 +182,7 @@
+ 
+     // (1) freeze = 0 : 좌표는 쓰되 이동 허용
+     let h1 = init_with_hints(&inst, &cfg, &[hint(0, 0, far_x, 0.0)]);
++    let free_before = item_poses(&solution_json(h1), 0);
+     let w1_init = strip_width(&solution_json(h1));
+     assert!(
+         w1_init > w_base * 2.0,
+@@ -176,8 +191,9 @@
+     assert_eq!(swarm_explore_phase(h1), 0);
+     let w1_expl = strip_width(&solution_json(h1));
+ 
+-    // (2) freeze = 1 : 같은 좌표에 고정 → 그 아래로는 절대 못 줄인다
++    // (2) freeze = 1 : strip 폭과 무관하게 원래 좌표/회전을 유지한다
+     let h2 = init_with_hints(&inst, &cfg, &[hint(0, 1, far_x, 0.0)]);
++    let frozen_before = item_poses(&solution_json(h2), 0);
+     let w2_init = strip_width(&solution_json(h2));
+     assert_eq!(swarm_explore_phase(h2), 0);
+     let w2_expl = strip_width(&solution_json(h2));
+@@ -186,14 +202,8 @@
+     println!("freeze=1: init {w2_init:.2} -> explore {w2_expl:.2}");
+ 
+     assert!(w1_expl < w1_init, "freeze=0인데 탐색이 전혀 줄이지 못했다");
+-    assert!(
+-        w2_expl >= far_x,
+-        "freeze=1 아이템이 움직였다 (폭이 고정 위치보다 좁아짐)"
+-    );
+-    assert!(
+-        w1_expl < w2_expl,
+-        "freeze 0/1이 동일하게 동작한다 = 고정과 시작위치가 분리되지 않았다: {w1_expl:.2} vs {w2_expl:.2}"
+-    );
++    assert_ne!(free_before, item_poses(&solution_json(h1), 0));
++    assert_eq!(frozen_before, item_poses(&solution_json(h2), 0));
+ 
+     swarm_free(h0);
+     swarm_free(h1);
+@@ -226,7 +236,9 @@
+     cfg.exploration.time_limit_secs = 8.0;
+     let inst = instance_json("fu");
+ 
+-    let w_base = strip_width(&solution_json(init(&inst, &cfg)));
++    let baseline = init(&inst, &cfg);
++    let w_base = strip_width(&solution_json(baseline));
++    swarm_free(baseline);
+     let (near_x, far_x) = (w_base * 2.0, w_base * 5.0);
+     println!("fu 기준 폭 {w_base:.2} / 고정 위치 {near_x:.2} / 이동 대상 위치 {far_x:.2}");
+ 
+@@ -236,34 +248,32 @@
+         &cfg,
+         &[hint(0, 0, far_x, 0.0), hint(1, 1, near_x, 0.0)],
+     );
+-    let w_mixed_init = strip_width(&solution_json(h_mixed));
++    let mixed_before = solution_json(h_mixed);
++    let w_mixed_init = strip_width(&mixed_before);
+     assert_eq!(swarm_explore_phase(h_mixed), 0);
+     let w_mixed = strip_width(&solution_json(h_mixed));
+ 
+-    // (2) 대조: 둘 다 고정 → far_x 아래로 못 줄인다
++    // (2) 대조: 둘 다 고정 → strip 폭과 무관하게 두 좌표를 모두 유지한다
+     let h_both = init_with_hints(
+         &inst,
+         &cfg,
+         &[hint(0, 1, far_x, 0.0), hint(1, 1, near_x, 0.0)],
+     );
++    let both_before = solution_json(h_both);
+     assert_eq!(swarm_explore_phase(h_both), 0);
+     let w_both = strip_width(&solution_json(h_both));
+ 
+     println!("혼합(0 자유/1 고정): init {w_mixed_init:.2} -> explore {w_mixed:.2}");
+     println!("둘 다 고정         : explore {w_both:.2}");
+ 
+-    assert!(
+-        w_both >= far_x,
+-        "둘 다 고정인데 폭이 고정 위치보다 좁아졌다: {w_both:.2} < {far_x:.2}"
+-    );
+-    assert!(
+-        w_mixed < w_both,
+-        "고정되지 않은 아이템이 움직이지 않았다: 혼합 {w_mixed:.2} vs 전부고정 {w_both:.2}"
+-    );
+-    assert!(
+-        w_mixed >= near_x,
+-        "고정된 아이템이 움직였다 (폭이 고정 위치보다 좁아짐): {w_mixed:.2} < {near_x:.2}"
+-    );
++    let mixed_after = solution_json(h_mixed);
++    let both_after = solution_json(h_both);
++    assert_eq!(item_poses(&mixed_before, 1), item_poses(&mixed_after, 1));
++    assert_ne!(item_poses(&mixed_before, 0), item_poses(&mixed_after, 0));
++    for id in [0, 1] {
++        assert_eq!(item_poses(&both_before, id), item_poses(&both_after, id));
++    }
++    assert!(w_mixed < w_mixed_init);
+ 
+     swarm_free(h_mixed);
+     swarm_free(h_both);
+--- a/swarm-core/tests/parallel_optimization.rs
++++ b/swarm-core/tests/parallel_optimization.rs
+@@ -5,7 +5,9 @@
+ use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
+ use swarm_core::config::DEFAULT_SWARM_CONFIG;
+ use swarm_core::optimizer::separator::Separator;
+-use swarm_core::structure::pipeline::solution_validation_error;
++use swarm_core::structure::pipeline::{
++    solution_validation_error, solution_validation_error_with_frozen,
++};
+ use swarm_core::util::assertions::{frozen_poses_preserved, tracker_matches_layout};
+ use swarm_core::util::terminator::{BasicTerminator, Terminator};
+ use std::time::Duration;
+@@ -108,7 +110,10 @@
+         assert!(!results.is_empty());
+         for result in results {
+             assert!(frozen_poses_preserved(&initial, &result, &sep.frozen_mask));
+-            assert!(solution_validation_error(&instance, &result).is_none());
++            assert!(
++                solution_validation_error_with_frozen(&instance, &result, &sep.frozen_mask)
++                    .is_none()
++            );
+         }
+     }
+ }
+@@ -142,7 +147,10 @@
+     sep.rollback(&wide, None);
+     sep.rollback(&narrow, None);
+     assert_eq!(poses(&wide), poses(&sep.prob.save()));
+-    assert!(solution_validation_error(&instance, &sep.prob.save()).is_none());
++    assert!(
++        solution_validation_error_with_frozen(&instance, &sep.prob.save(), &sep.frozen_mask)
++            .is_none()
++    );
+ }
+ #[test]
+ fn grouped_polish_translates_rigid_units_and_preserves_locks() {
+@@ -182,7 +190,7 @@
+         &DEFAULT_SWARM_CONFIG.lp_solver,
+     );
+     assert!(frozen_poses_preserved(&initial, &result, &sep.frozen_mask));
+-    assert!(solution_validation_error(&instance, &result).is_none());
++    assert!(solution_validation_error_with_frozen(&instance, &result, &sep.frozen_mask).is_none());
+     assert!(result.strip_width() < initial.strip_width() - 0.1);
+     let dt = |id| {
+         result
+@@ -261,7 +269,7 @@
+ }
+ 
+ #[test]
+-fn polish_retains_equal_width_improvement_when_a_frozen_item_sets_the_width() {
++fn polish_shrinks_past_frozen_right_edge_and_keeps_movable_improvement() {
+     let (instance, mut problem) = fixture(3, 4);
+     problem.fit_strip();
+     let initial = problem.save();
+@@ -282,7 +290,8 @@
+         &DEFAULT_SWARM_CONFIG.nfp_integration,
+         &DEFAULT_SWARM_CONFIG.lp_solver,
+     );
+-    assert_eq!(initial.strip_width(), result.strip_width());
++    assert!(result.strip_width() < initial.strip_width());
++    assert!(solution_validation_error(&instance, &result).is_some());
+     let before = initial
+         .layout_snapshot
+         .placed_items
+@@ -299,5 +308,5 @@
+         .d_transf;
+     assert!(after.translation().0 < before.translation().0 - 0.1);
+     assert!(frozen_poses_preserved(&initial, &result, &sep.frozen_mask));
+-    assert!(solution_validation_error(&instance, &result).is_none());
+-}
++    assert!(solution_validation_error_with_frozen(&instance, &result, &sep.frozen_mask).is_none());
++}
+--- /dev/null
++++ b/swarm-core/tests/frozen_policy.rs
+@@ -0,0 +1,150 @@
++use jagua_rs::entities::Instance;
++use jagua_rs::geometry::{DTransformation, geo_traits::Transformable};
++use jagua_rs::io::import::Importer;
++use jagua_rs::probs::spp::entities::{SPInstance, SPPlacement, SPProblem};
++use jagua_rs::probs::spp::io::ext_repr::ExtSPInstance;
++use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
++use swarm_core::{
++    config::DEFAULT_SWARM_CONFIG, optimizer::separator::Separator,
++    quantify::tracker::CollisionTracker,
++    structure::pipeline::solution_validation_error_with_frozen, util::frozen,
++};
++
++fn problem(positions: &[(f32, f32)]) -> (SPInstance, SPProblem) {
++    let items = (0..positions.len())
++        .map(|id| {
++            serde_json::json!({"id":id,"demand":1,
++        "allowed_orientations":[0.0],"shape":{"type":"rectangle","data":{
++            "x_min":0.0,"y_min":0.0,"width":4.0,"height":4.0}}})
++        })
++        .collect::<Vec<_>>();
++    let ext: ExtSPInstance = serde_json::from_value(serde_json::json!({"name":"frozen-policy",
++        "strip_height":20.0,"items":items}))
++    .unwrap();
++    let cfg = DEFAULT_SWARM_CONFIG;
++    let importer = Importer::new(
++        cfg.cde_config,
++        cfg.poly_simpl_tolerance,
++        cfg.min_item_separation,
++        cfg.narrow_concavity_cutoff_ratio,
++    );
++    let instance = jagua_rs::probs::spp::io::import_instance(&importer, &ext).unwrap();
++    let mut prob = SPProblem::new(instance.clone());
++    frozen::change_strip_width(&mut prob, 30.0);
++    let placements = positions
++        .iter()
++        .enumerate()
++        .map(|(id, &xy)| SPPlacement {
++            item_id: id,
++            d_transf: DTransformation::new(0.0, xy),
++        })
++        .collect::<Vec<_>>();
++    frozen::prepare_placements(
++        &mut prob,
++        placements.iter().map(|p| {
++            instance
++                .item(p.item_id)
++                .shape_cd
++                .transform_clone(&p.d_transf.compose())
++                .bbox
++        }),
++    );
++    for p in placements {
++        prob.place_item(p);
++    }
++    (instance, prob)
++}
++
++#[test]
++fn locks_outside_every_strip_edge_and_mutual_overlap_are_exempt() {
++    for xy in [
++        (-1000.0, -1000.0),
++        (-2.0, 4.0),
++        (10.0, 1000.0),
++        (1000.0, 5.0),
++    ] {
++        let (instance, prob) = problem(&[xy, xy, (7.0, 7.0)]);
++        let mask = [true, true, false];
++        assert_eq!(
++            CollisionTracker::new_with_frozen(&prob.layout, &mask).get_total_loss(),
++            0.0
++        );
++        assert!(solution_validation_error_with_frozen(&instance, &prob.save(), &mask).is_none());
++        assert!(
++            swarm_core::structure::pipeline::solution_validation_error(&instance, &prob.save())
++                .is_some()
++        );
++        let saved = prob.save();
++        let mut sep = Separator::new(
++            instance.clone(),
++            prob,
++            Xoshiro256PlusPlus::seed_from_u64(42),
++            DEFAULT_SWARM_CONFIG.expl_cfg.separator_config,
++        );
++        sep.freeze_items(&[0, 1]);
++        assert_eq!(sep.min_feasible_width(), None);
++        sep.change_strip_width(15.0, None);
++        assert!(swarm_core::util::assertions::frozen_poses_preserved(
++            &saved,
++            &sep.prob.save(),
++            &mask
++        ));
++        assert!(
++            solution_validation_error_with_frozen(&instance, &sep.prob.save(), &mask).is_none()
++        );
++        sep.rollback(&saved, None);
++        assert_eq!(sep.ct.get_total_loss(), 0.0);
++        assert!(
++            solution_validation_error_with_frozen(&instance, &sep.prob.save(), &mask).is_none()
++        );
++    }
++}
++
++#[test]
++fn movable_against_lock_and_movable_exterior_are_still_rejected() {
++    for positions in [[(-1.0, 4.0), (1.0, 4.0)], [(5.0, 5.0), (1000.0, 5.0)]] {
++        let (instance, prob) = problem(&positions);
++        let mask = [true, false];
++        assert!(CollisionTracker::new_with_frozen(&prob.layout, &mask).get_total_loss() > 0.0);
++        assert!(solution_validation_error_with_frozen(&instance, &prob.save(), &mask).is_some());
++    }
++}
++
++#[test]
++fn frozen_nonfinite_export_transform_is_rejected() {
++    let (instance, prob) = problem(&[(5.0, 5.0)]);
++    for xy in [(f32::NEG_INFINITY, 5.0), (5.0, f32::INFINITY)] {
++        let mut solution = prob.save();
++        solution
++            .layout_snapshot
++            .placed_items
++            .values_mut()
++            .next()
++            .unwrap()
++            .d_transf = DTransformation::new(0.0, xy);
++        assert!(solution_validation_error_with_frozen(&instance, &solution, &[true]).is_some());
++    }
++}
++
++#[test]
++fn all_frozen_layout_keeps_positive_width_and_rejects_invalid_resize() {
++    let (instance, prob) = problem(&[(-1000.0, -1000.0), (-1000.0, -1000.0)]);
++    let mut sep = Separator::new(
++        instance,
++        prob,
++        Xoshiro256PlusPlus::seed_from_u64(42),
++        DEFAULT_SWARM_CONFIG.expl_cfg.separator_config,
++    );
++    sep.freeze_items(&[0, 1]);
++    let saved = sep.prob.save();
++    assert_eq!(sep.min_feasible_width(), Some(saved.strip_width()));
++    for width in [0.0, -1.0, f32::INFINITY, f32::NAN] {
++        assert!(!sep.change_strip_width_with_control(width, None, &mut || false));
++        assert_eq!(sep.prob.strip_width(), saved.strip_width());
++        assert!(swarm_core::util::assertions::frozen_poses_preserved(
++            &saved,
++            &sep.prob.save(),
++            &sep.frozen_mask
++        ));
++    }
++}
+--- a/include/swarm.h
++++ b/include/swarm.h
+@@ -294,6 +294,9 @@
+  * point of sending one. is_freeze is a separate, additional constraint on top of it:
+  *   is_freeze = 0 : start here, but exploration/compression may move it (warm start)
+  *   is_freeze = 1 : start here and never move
++ * Frozen/frozen overlap and frozen/strip-exterior conflicts are permitted in
++ * Init, Explore, Compress, Polish, validation, callbacks and exports. Movable
++ * placements must still avoid frozen placements and remain inside the strip.
+  * Items without a hint are placed by the LBF constructor as before, so hinting a subset
+  * seeds those and lets LBF fill in the rest.
+  * A hint whose item_id is out of range is ignored.

@@ -1,0 +1,22 @@
+[package]
+name = "nesting-engine"
+version = "0.1.0"
+edition = "2024"
+description = "신규 초기 배치 엔진 — 구현 지시서(§0~§8): Draft → 재시작+LP → Complete → 잔여조각 LP → 밀어내기 압축. 기존 swarm 엔진과 독립"
+
+[lib]
+name = "nesting_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nesting-engine"
+path = "src/bin/nesting_engine.rs"
+
+[dependencies]
+clipper2 = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+# 압축 LP (§5) 의 외부 솔버. 지시서 §12.1.17 AC5: 원천도 외부 LP 라이브러리(Clp 계열)를 쓴다 —
+# 우리는 자체 LP 표현만 만들고 풀이는 워크스페이스가 이미 쓰는 순수 Rust simplex 에 맡긴다.
+microlp = { version = "0.6", default-features = false }

@@ -1,0 +1,260 @@
+use crate::collision_detection::hazards::filter::{PlacedItemFilter, QualityZoneFilter};
+use crate::collision_detection::hazards::{HazKey, Hazard};
+use crate::collision_detection::{CDESnapshot, CDEngine};
+use crate::entities::Container;
+use crate::entities::Item;
+use crate::entities::{PItemKey, PlacedItem};
+use crate::geometry::DTransformation;
+use crate::util::assertions;
+use itertools::Itertools;
+use slotmap::SlotMap;
+use std::sync::Arc;
+
+/// A [`Layout`] is a dynamic representation of items that have been placed in a container at specific positions.
+/// Items can be placed and removed. The container can be swapped. Snapshots can be taken and restored to.
+/// Each layout maintains a [`CDEngine`], which can be used to check for collisions before placing items.
+#[derive(Clone)]
+pub struct Layout {
+    /// The container used for this layout
+    pub(crate) container: Container,
+    /// All the items that have been placed in this layout, indexed by a unique key
+    pub(crate) placed_items: SlotMap<PItemKey, PlacedItem>,
+    /// The collision detection engine for this layout
+    cde: CDEngine,
+}
+
+impl Layout {
+    #[must_use]
+    pub fn new(container: Container) -> Self {
+        let cde = container.base_cde.as_ref().clone();
+        Layout {
+            container,
+            placed_items: SlotMap::with_key(),
+            cde,
+        }
+    }
+
+    #[must_use]
+    pub fn from_snapshot(ls: &LayoutSnapshot) -> Self {
+        let mut layout = Layout::new(ls.container.clone());
+        layout
+            .restore(ls)
+            .expect("snapshot shares the container's static base");
+        layout
+    }
+
+    /// Replaces the current container with a new one, rebuilding the collision detection engine accordingly.
+    pub fn swap_container(&mut self, container: Container) {
+        let cde_snapshot = self.cde.save();
+        // rebuild the CDE
+        self.container = container;
+        self.cde = self.container.base_cde.as_ref().clone();
+        for hazard in cde_snapshot.dynamic_hazards {
+            // re-register all dynamic hazards from the previous CDE snapshot
+            self.cde.register_hazard(hazard);
+        }
+    }
+
+    /// Saves the current state of the layout to be potentially restored to later.
+    #[must_use]
+    pub fn save(&self) -> LayoutSnapshot {
+        LayoutSnapshot {
+            container: self.container.clone(),
+            placed_items: self.placed_items.clone(),
+            cde_snapshot: self.cde.save(),
+        }
+    }
+
+    /// Restores the layout from a snapshot.
+    ///
+    /// # Errors
+    /// Returns [`ContainerMismatch`] if the snapshot uses a different container,
+    /// leaving the layout unchanged.
+    /// Use [`Layout::swap_container`] first or [`Layout::from_snapshot`] to
+    /// restore a snapshot with a different container.
+    pub fn restore(&mut self, layout_snapshot: &LayoutSnapshot) -> Result<(), ContainerMismatch> {
+        if !Arc::ptr_eq(
+            &self.container.base_cde,
+            &layout_snapshot.container.base_cde,
+        ) {
+            return Err(ContainerMismatch);
+        }
+        self.container.clone_from(&layout_snapshot.container);
+
+        self.placed_items.clone_from(&layout_snapshot.placed_items);
+        self.cde.restore(&layout_snapshot.cde_snapshot);
+
+        debug_assert!(assertions::layout_qt_matches_fresh_qt(self));
+        debug_assert!(assertions::snapshot_matches_layout(self, layout_snapshot));
+        Ok(())
+    }
+
+    /// Places an item in the layout at a specific position by applying a transformation.
+    /// Returns the unique key for the placed item.
+    /// Does not check collisions or orientation permissions before placement.
+    pub fn place_item(&mut self, item: &Arc<Item>, d_transformation: DTransformation) -> PItemKey {
+        let pk = self
+            .placed_items
+            .insert(PlacedItem::new(item, d_transformation));
+        let pi = &self.placed_items[pk];
+        // CAPLANET: one hazard per part.
+        for (part, shape) in pi.shapes.iter().enumerate() {
+            let hazard = Hazard::new(pi.part_entity(pk, part), shape.clone());
+            self.cde.register_hazard(hazard);
+        }
+
+        debug_assert!(assertions::layout_qt_matches_fresh_qt(self));
+
+        pk
+    }
+
+    /// Removes an item from the layout by its unique key and returns the removed [`PlacedItem`].
+    pub fn remove_item(&mut self, pk: PItemKey) -> PlacedItem {
+        let pi = self
+            .placed_items
+            .remove(pk)
+            .expect("key is not valid anymore");
+
+        // update the collision detection engine (CAPLANET: every part)
+        for part in 0..pi.n_parts() {
+            self.cde.deregister_hazard_by_entity(pi.part_entity(pk, part));
+        }
+
+        debug_assert!(assertions::layout_qt_matches_fresh_qt(self));
+
+        pi
+    }
+
+    /// True if no items are placed
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.placed_items.is_empty()
+    }
+
+    /// The current density of the layout defined as the ratio of the area of the items placed to the area of the container.
+    /// Uses the original shapes of items and container to calculate the area.
+    #[must_use]
+    pub fn density(&self) -> f32 {
+        self.placed_item_area() / self.container.area()
+    }
+
+    /// The sum of the areas of the items placed in the layout (using the original shapes of the items).
+    #[must_use]
+    pub fn placed_item_area(&self) -> f32 {
+        self.placed_items
+            .values()
+            .map(|pi| pi.item.area())
+            .sum::<f32>()
+    }
+
+    /// Distinct item types present in this layout.
+    pub fn items(&self) -> impl Iterator<Item = &Item> {
+        self.placed_items
+            .values()
+            .map(|pi| pi.item.as_ref())
+            .unique_by(|item| item.idx)
+    }
+
+    /// Returns the collision detection engine for this layout
+    #[must_use]
+    pub fn cde(&self) -> &CDEngine {
+        &self.cde
+    }
+
+    /// CAPLANET: the hazard keys of every part of a placed item, in part order.
+    #[must_use]
+    pub fn haz_keys(&self, pk: PItemKey) -> Vec<HazKey> {
+        let Some(pi) = self.placed_items.get(pk) else {
+            return Vec::new();
+        };
+        (0..pi.n_parts())
+            .map(|part| {
+                self.cde
+                    .haz_key(&pi.part_entity(pk, part))
+                    .expect("placed part must be registered")
+            })
+            .collect()
+    }
+
+    /// Returns true if no placed item collides with the container or another item.
+    /// Quality zones meeting each item's minimum quality are ignored; holes remain blocking.
+    #[must_use]
+    pub fn is_collision_free(&self) -> bool {
+        // CAPLANET: every part is checked, ignoring all parts of the same placement.
+        self.placed_items.iter().all(|(pk, pi)| {
+            let own = PlacedItemFilter(pk);
+            pi.shapes.iter().all(|shape| match pi.item.min_quality {
+                Some(min_quality) => {
+                    let filter = (QualityZoneFilter { min_quality }, own);
+                    !self.cde.detect_poly_collision(shape, &filter)
+                }
+                None => !self.cde.detect_poly_collision(shape, &own),
+            })
+        })
+    }
+
+    /// The container used for this layout
+    #[must_use]
+    pub fn container(&self) -> &Container {
+        &self.container
+    }
+
+    /// All the items that have been placed in this layout, indexed by a unique key
+    #[must_use]
+    pub fn placed_items(&self) -> &SlotMap<PItemKey, PlacedItem> {
+        &self.placed_items
+    }
+}
+
+/// The layout and snapshot do not share the same static collision base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("layout and snapshot have different static collision bases")]
+pub struct ContainerMismatch;
+
+/// Immutable and compact representation of a [`Layout`].
+/// Can be used to restore a [`Layout`] back to a previous state.
+#[derive(Clone, Debug)]
+pub struct LayoutSnapshot {
+    /// A copy of the container used in the layout
+    pub(crate) container: Container,
+    /// A copy of the placed items in the layout
+    pub(crate) placed_items: SlotMap<PItemKey, PlacedItem>,
+    /// Snapshot of the collision detection engine
+    pub(crate) cde_snapshot: CDESnapshot,
+}
+
+impl LayoutSnapshot {
+    /// The container captured in this snapshot.
+    #[must_use]
+    pub fn container(&self) -> &Container {
+        &self.container
+    }
+
+    /// The placements captured in this snapshot.
+    #[must_use]
+    pub fn placed_items(&self) -> &SlotMap<PItemKey, PlacedItem> {
+        &self.placed_items
+    }
+
+    /// CAPLANET: mutable access for tests that fabricate inconsistent snapshots
+    /// (missing members, drifted poses) to exercise validation. Not for optimizers.
+    #[doc(hidden)]
+    pub fn placed_items_mut(&mut self) -> &mut SlotMap<PItemKey, PlacedItem> {
+        &mut self.placed_items
+    }
+
+    /// Equivalent to [`Layout::density`]
+    #[must_use]
+    pub fn density(&self) -> f32 {
+        self.placed_item_area() / self.container.area()
+    }
+
+    /// Equivalent to [`Layout::placed_item_area`]
+    #[must_use]
+    pub fn placed_item_area(&self) -> f32 {
+        self.placed_items
+            .values()
+            .map(|pi| pi.item.area())
+            .sum::<f32>()
+    }
+}

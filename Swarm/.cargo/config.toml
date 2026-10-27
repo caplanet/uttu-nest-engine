@@ -1,0 +1,14 @@
+# Embed the MSVC CRT in Windows artifacts, including cc-built C/C++ dependencies.
+# Keep target selection/output paths unchanged; other platforms are unaffected.
+[target.'cfg(all(target_os = "windows", target_env = "msvc"))']
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    # 하드닝(C-3): 링커가 PDB/디버그 디렉터리를 만들지 않게 한다. rustc 가 /DEBUG 를 넘겨도
+    # 뒤에 붙는 /DEBUG:NONE 이 우선하여 cpswcore.pdb 참조가 바이너리에서 사라진다.
+    "-C", "link-arg=/DEBUG:NONE",
+    # 하드닝(C-1,C-2): panic/assert/expect 의 Location(file!/line!/col!)을 제거한다.
+    # trim-paths 는 절대경로/사용자명만 지우고 "크레이트-버전\src\...", "swarm-core\src\..." 같은
+    # 상대 모듈경로는 남긴다. 이 nightly 플래그가 그 경로 문자열의 발생원 자체를 없앤다.
+    # (패닉 "메시지" 텍스트는 유지되므로 catch_unwind→swarm_get_last_error_message 는 계속 동작)
+    "-Z", "location-detail=none",
+]

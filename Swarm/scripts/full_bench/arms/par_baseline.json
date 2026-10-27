@@ -1,0 +1,1 @@
+{"_note":"1코어 1스레드 단독 탐색 — 같은 3코어를 시드 3개에 나눠 쓰고 최선을 취한다","exploration.separator.n_workers":1,"compression.separator.n_workers":1}

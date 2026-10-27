@@ -1,0 +1,15 @@
+[package]
+name = "swarm-nfp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Robust, standalone no-fit-polygon geometry kernel for Swarm"
+
+[dependencies]
+clipper2 = { version = "=0.6.0", default-features = false }
+earcutr = "=0.4.3"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+
+[dev-dependencies]
+serde_json = "1.0"

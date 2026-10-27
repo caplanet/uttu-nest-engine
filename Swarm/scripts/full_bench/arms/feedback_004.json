@@ -1,0 +1,1 @@
+{"_note":"살아난 실패 피드백: base 0.004에서 시작해 폭마다 첫 실패 시 x0.6, 성공 시 회복. 처음엔 크게, 벽에서 잘게","exploration.shrink_step":0.004,"shrink_feedback.fail_decay":0.6,"shrink_feedback.scale_min":0.05}

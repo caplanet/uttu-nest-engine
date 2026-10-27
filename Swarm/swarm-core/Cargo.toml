@@ -1,0 +1,80 @@
+[package]
+name = "swarm-core"
+version = "0.1.0"
+edition = "2024"
+description = "State-of-the-art nesting heuristic for 2D irregular strip packing problems — core library"
+
+[dependencies]
+jagua-rs = { features = ["spp"], path = "../third_party/jagua-rs" }
+rand = "0.10"
+rand_distr = "0.6"
+svg = "0.18"
+itertools = "0.15"
+# 하드닝: 도메인 시드 유도를 VM 으로 가상화(런타임 인터프리터). third_party 에 벤더링.
+cpguard = { path = "../third_party/cpguard/cpguard" }
+# 하드닝: release 빌드에서 로그 매크로 컴파일 아웃 (루트 Cargo.toml 과 동일 정책).
+# feature 는 그래프 전역으로 통합되므로 off 가 info 보다 우선 적용된다.
+log = { version = "0.4", features = ["release_max_level_off"] }
+fern = "0.7"
+serde = "1.0"
+serde_json = "1.0"
+tap = "1.0"
+slotmap = "1.0"
+float-cmp = "0.10"
+ordered-float = "5.0"
+rayon = "1.10"
+num_cpus = "1.17"
+jiff = "0.2"
+test-case = "3.3"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+getrandom = { version = "0.4", features = ["wasm_js"] }
+# LP compaction 단계에서 사용하는 순수 Rust simplex 솔버
+microlp = { version = "0.6", default-features = false }
+# 내점법(QP 지원) LP/QP 백엔드. 기본 feature(serde)로 빌드된다 — SDP 계열 feature는
+# BLAS/LAPACK 을 요구해 빌드 환경을 가리므로 켜지 않는다.
+clarabel = "0.11"
+# 완전 다각형 NFP 기하 커널 (PerfectNFP 이식)
+swarm-nfp = { path = "../swarm-nfp" }
+libloading = "0.8"
+clipper2 = "0.6"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ctrlc = "3.5"
+
+[features]
+cpguard-policy-off = [] # A/B baseline only; protected_seed remains enabled
+init-profile = []
+simd = []
+capmods = []
+# 탐색(exploration) 단계를 적응형 변형(optimizer/explore_mods.rs)으로 교체한다.
+# capmods와 독립적으로 켜고 끌 수 있다.
+adaptive = []
+# Experimental "structure first, search assisted" P0-P5 pipeline.  Kept as
+# an explicit feature so the legacy optimiser remains a clean A/B control.
+structure-first = []
+# 런타임 안티탬퍼(선택, 기본 off). cpguard 의 antitamper+telemetry 를 켠다. 탐지는 Windows 전용.
+antitamper = ["cpguard/antitamper", "cpguard/telemetry"]
+# 점진 저하 신호까지(양날: 오탐 시 정상 사용자 품질 저하). 기본 off.
+antitamper-degrade = ["antitamper", "cpguard/degrade"]
+
+# 아래 예제는 `adaptive` 기능의 explore_mods 를 쓰므로 기능 없이는 빌드 대상에서 뺀다.
+[[example]]
+name = "async_separator_trial"
+required-features = ["adaptive"]
+
+[[example]]
+name = "phase_improvements_bench"
+required-features = ["adaptive"]
+
+[[example]]
+name = "adaptive_control_trial"
+required-features = ["adaptive"]
+
+[[example]]
+name = "adaptive_control_after_trial"
+required-features = ["adaptive"]
+
+[[example]]
+name = "original_overlap_trial"
+required-features = ["adaptive"]

@@ -1,0 +1,1 @@
+{"_note":"band_full + GLS 가중치 동적범위 복원 — 포화 전 등급 구간을 분리 루프 전체로 늘린다","band_rearrange.post_shrink":1,"band_rearrange.full_band":1,"gls.min_inc":1.02,"gls.max_inc":1.10,"gls.decay":0.99,"gls.max_weight":1000.0}

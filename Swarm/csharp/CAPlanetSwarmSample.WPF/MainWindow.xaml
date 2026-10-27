@@ -1,0 +1,133 @@
+﻿<bars:RibbonWindow
+    x:Class="CAPlanetSwarmSample.WPF.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+    xmlns:local="clr-namespace:CAPlanetSwarmSample.WPF"
+    xmlns:local_res="clr-namespace:CAPlanetSwarmSample.WPF.Resources"
+    xmlns:local_views="clr-namespace:CAPlanetSwarmSample.WPF.Views"
+    xmlns:bars="http://schemas.actiprosoftware.com/winfx/xaml/bars"
+    xmlns:docking="http://schemas.actiprosoftware.com/winfx/xaml/docking"
+    xmlns:shared="http://schemas.actiprosoftware.com/winfx/xaml/shared"
+    xmlns:themes="http://schemas.actiprosoftware.com/winfx/xaml/themes"
+    mc:Ignorable="d"
+    d:DataContext="{d:DesignInstance local:MainWindowViewModel}"
+    themes:ThemeManager.DesignModeAreNativeThemesEnabled="True"
+    themes:ThemeManager.DesignModeTheme="Dark"
+    themes:ThemeManager.AreNativeThemesEnabled="True"
+    themes:ThemeManager.Theme="Dark"
+    Title="UTTU Nest - Swarm" Height="720" Width="1024" MinHeight="720" MinWidth="1024">
+    <Window.Resources>
+        <DataTemplate DataType="{x:Type local_views:WorkspaceViewModel}">
+            <local_views:WorkspaceView />
+        </DataTemplate>
+    </Window.Resources>
+    <themes:WindowChrome.Chrome>
+        <themes:RibbonWindowChrome BackdropKind="None" TitleBarHeaderAlignment="Center" />
+    </themes:WindowChrome.Chrome>
+    <themes:WindowChrome.OverlayContent>
+        <Grid Background="#80000000">
+            <shared:ShadowChrome HorizontalAlignment="Center"
+                                 VerticalAlignment="Center"
+                                 Elevation="20"/>
+        </Grid>
+    </themes:WindowChrome.OverlayContent>
+
+    <bars:RibbonContainerPanel>
+        <bars:Ribbon x:Name="ribbon"
+                     IsApplicationButtonVisible="False"
+                     BorderBrush="Transparent"
+                     BorderThickness="0"
+                     CanChangeLayoutMode="False"
+                     LayoutMode="Classic"
+                     GroupLabelMode="Default"
+                     IsCollapsed="False"
+                     IsCollapsible="False"
+                     IsOptionsButtonVisible="False"
+                     QuickAccessToolBarMode="None"
+                     UserInterfaceDensity="Compact">
+            <!-- Keep the classic layout; scale only the ribbon's icons, text and spacing. -->
+            <bars:Ribbon.LayoutTransform>
+                <ScaleTransform ScaleX="0.8" ScaleY="0.8" />
+            </bars:Ribbon.LayoutTransform>
+
+            <bars:RibbonTabItem Label="Home">
+                <bars:RibbonGroup Label="Input">
+                    <bars:RibbonControlGroup>
+                        <bars:BarButton Command="{Binding OpenInputJsonCommand}"
+                                        Label="Open Json"
+                                        LargeImageSource="{x:Static local_res:PathIconResource.TemplateImage}" />
+                    </bars:RibbonControlGroup>
+                </bars:RibbonGroup>
+
+                <!--<bars:RibbonGroup Label="Nesting">
+                    <bars:BarButton Command="{Binding StartCommand}"
+                                    Label="Satrt"
+                                    LargeImageSource="{x:Static local_res:PathIconResource.PlayImage}" />
+                    <bars:BarButton Command="{Binding StopCommand}"
+                                    Label="Stop"
+                                    LargeImageSource="{x:Static local_res:PathIconResource.PauseImage}" />
+                </bars:RibbonGroup>-->
+                <bars:RibbonGroup Label="Output">
+                    <bars:RibbonControlGroup>
+                        <bars:BarButton Command="{Binding ExportOutputJsonCommand}"
+                                        Label="Export Json"
+                                        LargeImageSource="{x:Static local_res:PathIconResource.JsonImage}" />
+                    </bars:RibbonControlGroup>
+
+                    <bars:RibbonControlGroup>
+                        <bars:BarButton Command="{Binding ExportOutputSvgCommand}"
+                                        Label="Export SVG"
+                                        LargeImageSource="{x:Static local_res:PathIconResource.SVGImage}" />
+                    </bars:RibbonControlGroup>
+
+                    <bars:RibbonControlGroup>
+                        <bars:BarButton Command="{Binding ExportOutputPltCommand}"
+                                        Label="Export PLT"
+                                        ToolTip="배치된 원본 윤곽과 원단 테두리를 HPGL(.plt)로 저장합니다."
+                                        LargeImageSource="{x:Static local_res:PathIconResource.SVGImage}" />
+                    </bars:RibbonControlGroup>
+
+                </bars:RibbonGroup>
+            </bars:RibbonTabItem>
+
+            <bars:RibbonTabItem ContextualTabGroupKey="*"
+                                KeyTipText="H"
+                                Label="Help">
+                <bars:RibbonGroup Label="Support">
+                    <!--<bars:BarButton Command="{Binding OpenLogFolderCommand}"
+                                    Label="Open Log Folder"
+                                    LargeImageSource="{x:Static local_res:PathIconResource.LogOpenImage}" />-->
+                    <bars:BarButton Command="{Binding ShowAboutCommand}"
+                                    Label="About"
+                                    LargeImageSource="{x:Static local_res:PathIconResource.InformationImage}" />
+                </bars:RibbonGroup>
+            </bars:RibbonTabItem>
+        </bars:Ribbon>
+
+
+        <Grid>
+            <DockPanel>
+
+                <docking:DockSite x:Name="dockSite"
+                                  AreNewTabsInsertedBeforeExistingTabs="False"
+                                  CanDocumentWindowsFloat="False"
+                                  DocumentItemContainerStyle="{StaticResource DockingDocumentWindowStyle}"
+                                  DocumentItemTemplate="{StaticResource DockingDocumentItemContentTemplate}"
+                                  DocumentItemsSource="{Binding DockSite.DocumentItems}"
+                                  Style="{StaticResource DockSiteStyle}">
+                    <docking:Workspace Margin="0" Padding="0">
+                        <docking:TabbedMdiHost CanDocumentTabsDrag="False"
+                                               CanDocumentsAttach="False"
+                                               CanDocumentsCloseOnMiddleClick="False"
+                                               CanDocumentsDock="False"
+                                               ContextMenuService.IsEnabled="False"
+                                               TabStripPlacement="Bottom"/>
+                    </docking:Workspace>
+                </docking:DockSite>                
+            </DockPanel>
+        </Grid>        
+    </bars:RibbonContainerPanel>
+</bars:RibbonWindow>

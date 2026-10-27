@@ -1,0 +1,1 @@
+{"_note":"구간 완성 300mm + 오목부 채우기(면적 0.15 이하만 끌어올림)","lbf_raster.cell_ratio":0.02,"lbf_raster.max_cells":4000000,"lbf_raster.n_random_samples":4000,"constructor.band_width_mm":300.0,"constructor.band_fill_ratio":0.15}

@@ -1,0 +1,654 @@
+{
+  "workspace": "C:\\Caplanet\\AiWorks\\AdaptiveAlgorithm2",
+  "captured_at": "2026-09-07T16:56:01.5009596+09:00",
+  "rustc": "rustc 1.99.0-nightly (c4af71034 2026-07-06)",
+  "cargo": "cargo 1.99.0-nightly (2f0e7011e 2026-07-05)",
+  "features": [
+    "simd",
+    "capmods",
+    "adaptive",
+    "structure-first"
+  ],
+  "files": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "F2F80565F2A1B0264618190E18A3BB06ED468F7C4099FCD8B5EAC0D06C7E1736",
+      "bytes": 43666
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "0FA668A5B5B42132CB0863D73A5FC433AF994DBCF877900AB7B4BAED0D4044DD",
+      "bytes": 2247
+    },
+    {
+      "path": "CMakeLists.txt",
+      "sha256": "C851157F6AE15F46FF1AA7BD87218CECAFFC523AB977BCC1B9CFF921E3D6C4E4",
+      "bytes": 10518
+    },
+    {
+      "path": "CMakeSettings.json",
+      "sha256": "647AEF81CDBE79B6FC315D0852D73FD1A22985FFDE374CC91B11BF3BF6BA53D2",
+      "bytes": 781
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "sha256": "59079323E58CBD811A022441375C8259A364BD3434F88A2366C8B0A98DE5B465",
+      "bytes": 32
+    },
+    {
+      "path": "swarm-core/Cargo.toml",
+      "sha256": "D21A9F63628FC4EAB9923FF1FCDDF994340E564F150D2C8A955F255914BB3927",
+      "bytes": 1619
+    },
+    {
+      "path": "swarm-core/src/config.rs",
+      "sha256": "502B3423671946B931063324C033F62760F5B5FAF7B5B9B474061C6CD313565D",
+      "bytes": 55353
+    },
+    {
+      "path": "swarm-core/src/consts.rs",
+      "sha256": "B942B2A1AC928F51767C99D19585EC9B0B7742D8089AE8724156B9FF64099A98",
+      "bytes": 2781
+    },
+    {
+      "path": "swarm-core/src/escape/bottleneck.rs",
+      "sha256": "D21198D4FD7300BD924FE21118CFC36348D7A6AE77598DBC1413C0FD9A33E737",
+      "bytes": 32671
+    },
+    {
+      "path": "swarm-core/src/escape/conflict_burst.rs",
+      "sha256": "C8E846AE57A75FC67BF794EA43DF61E3D3496B416ED2DE352172719211CE220C",
+      "bytes": 92808
+    },
+    {
+      "path": "swarm-core/src/escape/guided.rs",
+      "sha256": "B88280EE4F30C9AAAA4FFBAD06645513C04FBAFBA0A19A05E3B8308401B5ABD0",
+      "bytes": 12147
+    },
+    {
+      "path": "swarm-core/src/escape/levels.rs",
+      "sha256": "1632B3CA075C09674984A13D2D1562242803B5C8366B264500119062FC94ACFA",
+      "bytes": 37856
+    },
+    {
+      "path": "swarm-core/src/escape/mod.rs",
+      "sha256": "19C60416F30319C1613F27406C87C7D7819039FF6918B83EBD5C7843B381F72F",
+      "bytes": 13053
+    },
+    {
+      "path": "swarm-core/src/escape/pipeline.rs",
+      "sha256": "3D0CFC6F43B98B64D7F8EA5C7B48F7B328E2390E30F524EE0A2F5B6164CE3C2F",
+      "bytes": 41717
+    },
+    {
+      "path": "swarm-core/src/escape/stagnation.rs",
+      "sha256": "E4691C79E1073641421F2D618528B76772895D3DD6B66F9C332801E1B918D693",
+      "bytes": 48940
+    },
+    {
+      "path": "swarm-core/src/escape/swarm.rs",
+      "sha256": "85658FE01E380725F6E1149E4CF2E8551708FD26EEFFD56E1C11C906076460B0",
+      "bytes": 18045
+    },
+    {
+      "path": "swarm-core/src/eval/group_sep_evaluator.rs",
+      "sha256": "5BA5B7FA6635A53ABC6324D92234D5B600BDCF095F1348366D4FBFDD4844D0B1",
+      "bytes": 6049
+    },
+    {
+      "path": "swarm-core/src/eval/lbf_evaluator.rs",
+      "sha256": "5098E8F28FDE2DFE802360C1A9B8603E2A1879094AF20E3F743BAB21C1D82DD2",
+      "bytes": 12366
+    },
+    {
+      "path": "swarm-core/src/eval/mod.rs",
+      "sha256": "E8B1EDC570B82D73CE900DF4707CE9A3FFD0BADF16150ECCDA970C224C57D59C",
+      "bytes": 139
+    },
+    {
+      "path": "swarm-core/src/eval/sample_eval.rs",
+      "sha256": "004536C9F14554D0D379399F99B2E8B03DB5900C90947D881DA138B72B959F80",
+      "bytes": 1340
+    },
+    {
+      "path": "swarm-core/src/eval/sep_evaluator.rs",
+      "sha256": "1060F64D6289A6B6DAD8537D71698D69C9260BF2F56C40A7E888334C407AFAF7",
+      "bytes": 3327
+    },
+    {
+      "path": "swarm-core/src/eval/specialized_jaguars_pipeline.rs",
+      "sha256": "40E9868397BB647076C532E879A45875E904A0B8A8E330C5B898661174DD4A50",
+      "bytes": 10091
+    },
+    {
+      "path": "swarm-core/src/initial/attach.rs",
+      "sha256": "9CF18E87C49BD16A9B14CB64D1065E0F0F7CD9282FFBAE08758C4F0CAEF91492",
+      "bytes": 158620
+    },
+    {
+      "path": "swarm-core/src/initial/compact.rs",
+      "sha256": "FFDDC0088FA70D68967FEC5F21F6AABEC68A1EB8D2762920924F37348100D346",
+      "bytes": 21588
+    },
+    {
+      "path": "swarm-core/src/initial/mod.rs",
+      "sha256": "8AF8AE110CBC0A968AA483CDA3644B55D9AE067C14665CD775199254F4179916",
+      "bytes": 7044
+    },
+    {
+      "path": "swarm-core/src/initial/nfp.rs",
+      "sha256": "69C2EF797EE50420BB239C0346DC890E0A540DF85D427504364668A66C3E53C4",
+      "bytes": 25357
+    },
+    {
+      "path": "swarm-core/src/initial/raster.rs",
+      "sha256": "DF5E28974B767A5FAEABEC290C539ADAF7852CD53821872BEEFD489F1585D7E6",
+      "bytes": 8101
+    },
+    {
+      "path": "swarm-core/src/lib.rs",
+      "sha256": "3710E69514BC2A0BA6D6790A37D0EF064083098ED5A938A4D6BEABD37AF74AF4",
+      "bytes": 690
+    },
+    {
+      "path": "swarm-core/src/lp_solver/clarabel_backend.rs",
+      "sha256": "C14B2AB0613D43A85400C047902ADA41D9B54161A1C608B6F1282C573DCB2808",
+      "bytes": 25737
+    },
+    {
+      "path": "swarm-core/src/lp_solver/clp.rs",
+      "sha256": "EEEEE683535EFFDA22EADB33EC9FEBDBFDF7A933E16B9355B7AA8B3C8C17F878",
+      "bytes": 34158
+    },
+    {
+      "path": "swarm-core/src/lp_solver/microlp_backend.rs",
+      "sha256": "6CF4A9190153B6CC2524E9BA7B31382CFF610E67A46694E9D9B7D00AA2A7BA54",
+      "bytes": 25461
+    },
+    {
+      "path": "swarm-core/src/lp_solver/mod.rs",
+      "sha256": "F54469209C467ABFFEF9C4589B5AEC2BA30FA67C67D1BFB8A23501E61BAE39DD",
+      "bytes": 20487
+    },
+    {
+      "path": "swarm-core/src/lp_solver/xpress.rs",
+      "sha256": "47C864C7B8C850E8370D912DABE7971DA9044AE9577948930A4E863C009D1BF0",
+      "bytes": 34064
+    },
+    {
+      "path": "swarm-core/src/nfp_lbf/cache.rs",
+      "sha256": "0C6771AF5523A246CB24653CAE1A5894E777BCDF2FD25D06AD54EB023FF8AF12",
+      "bytes": 83590
+    },
+    {
+      "path": "swarm-core/src/nfp_lbf/exploration.rs",
+      "sha256": "101E6EB81D516ECDEA72ABF52FF153EE708FE449EC9981CB6CCE00661B7B91E6",
+      "bytes": 48093
+    },
+    {
+      "path": "swarm-core/src/nfp_lbf/mod.rs",
+      "sha256": "C994F47C977FD337AEA1937F7667D6EF2FD2380F3935282C78AA9B06E6D62CAD",
+      "bytes": 7720
+    },
+    {
+      "path": "swarm-core/src/nfp_lbf/ordering.rs",
+      "sha256": "0F251E764CE0C813E470D7F85C5C9C985E1A9CFAAF85AB531CA5DA69378AF8D6",
+      "bytes": 61221
+    },
+    {
+      "path": "swarm-core/src/nfp_lbf/placement.rs",
+      "sha256": "2BC100482E2F6E2ABB7F98238017938413B7C005A56DD42C6F4FE0332FDE2612",
+      "bytes": 142456
+    },
+    {
+      "path": "swarm-core/src/nfp_lbf/score.rs",
+      "sha256": "E408B0D1391039FA226F604D93EAEE5E1147AA10874CDE5121FF69AC2C83FE9F",
+      "bytes": 29747
+    },
+    {
+      "path": "swarm-core/src/nfp_lbf/search.rs",
+      "sha256": "BFACE5364C9ADDEC5167D5AB88C46053E169276051CF371E61520550B8D44129",
+      "bytes": 48147
+    },
+    {
+      "path": "swarm-core/src/nfp_strategy/accrete.rs",
+      "sha256": "FA23C120B14E29A32B5103B3723C02848F044AFC6D65CCE3B38CF8219CE8D281",
+      "bytes": 31133
+    },
+    {
+      "path": "swarm-core/src/nfp_strategy/beam.rs",
+      "sha256": "BE60365ED1B8C5B87BB03962E3AF3AFA29CD9DED48F87C0EC5C2C766B42C74A5",
+      "bytes": 61889
+    },
+    {
+      "path": "swarm-core/src/nfp_strategy/cluster.rs",
+      "sha256": "7A095534CD982DC4F862C04CC0DE7ACF9BAE0B3A5DF11376AFD9AF7F583FD4C7",
+      "bytes": 85417
+    },
+    {
+      "path": "swarm-core/src/nfp_strategy/config.rs",
+      "sha256": "1E7C60DE7DC9B0FD7A88FE84C0A2AA8EB9DF9BD14276D51A3C82865492BA8EE6",
+      "bytes": 23379
+    },
+    {
+      "path": "swarm-core/src/nfp_strategy/jostle.rs",
+      "sha256": "5EB48A40CBE3DD201063666DE9276891E1EF4530C78FD946E96E9BE75792893F",
+      "bytes": 34070
+    },
+    {
+      "path": "swarm-core/src/nfp_strategy/mod.rs",
+      "sha256": "CAA47A1A123583D344848D93DF802446A0A8BF348AB9624C6046BF82F15B3D01",
+      "bytes": 19911
+    },
+    {
+      "path": "swarm-core/src/nfp_strategy/pipeline.rs",
+      "sha256": "FCBBF7794E847F9031C0F8D45A3485960661AD019E8994BDBAEB7A3C85BB466F",
+      "bytes": 32701
+    },
+    {
+      "path": "swarm-core/src/nfp_strategy/reflow.rs",
+      "sha256": "3AE3DA2462A74C28C1C71BAB60A776552372D827B2E50DEC1610578736448D58",
+      "bytes": 64178
+    },
+    {
+      "path": "swarm-core/src/nfp_strategy/rotations.rs",
+      "sha256": "3CFBB7A3B10043A19D8B24D896B08026E721660AF053DCDF081DB02FF94FEE38",
+      "bytes": 19047
+    },
+    {
+      "path": "swarm-core/src/nfp_strategy/select.rs",
+      "sha256": "14A6310C6F41A62329D66F235752CF6308432C7663C50FD705F0E2BE4DCF4E76",
+      "bytes": 84671
+    },
+    {
+      "path": "swarm-core/src/nfp_strategy/sliding.rs",
+      "sha256": "E054AF37CE7114BADB8B58753A60F7EC24F16DCF3487927B7B12266D639CDCA3",
+      "bytes": 43379
+    },
+    {
+      "path": "swarm-core/src/optimizer/adaptive_selector.rs",
+      "sha256": "EBE7A64764B0B598032622212D5A8D55E465E2A2FBAAFDAACC72891C77A8A5A2",
+      "bytes": 21634
+    },
+    {
+      "path": "swarm-core/src/optimizer/compress.rs",
+      "sha256": "E01AD5962B9BC0BD0FCA6329CB901E185D59FC2F28223943ED09D497D1BDAB94",
+      "bytes": 4557
+    },
+    {
+      "path": "swarm-core/src/optimizer/concavity.rs",
+      "sha256": "55308FC8C2150F2B9C908E9D31A3D2196B2959CD4C2BD6D12DF6D32FDBF152B9",
+      "bytes": 23194
+    },
+    {
+      "path": "swarm-core/src/optimizer/explore_mods.rs",
+      "sha256": "8B970D73CFB31BC16A1EFC9EE0BFE42D57622A5F50E9E4F5B9D664E1A18EE787",
+      "bytes": 68223
+    },
+    {
+      "path": "swarm-core/src/optimizer/explore.rs",
+      "sha256": "FCDF02316D24D01E11C2B44EB388AC53EFAE2A664363E8E3104D02CB3AF42D30",
+      "bytes": 18125
+    },
+    {
+      "path": "swarm-core/src/optimizer/lbf.rs",
+      "sha256": "3D90B8F4005D4D9F1895E8A50DCFA08BD7087C3B3F8739965B20C4A459294799",
+      "bytes": 81989
+    },
+    {
+      "path": "swarm-core/src/optimizer/lns.rs",
+      "sha256": "A2141FF58BF00928D22E8F1DBF0C58E7EB78A74407B10F15BE46F6E985B634A7",
+      "bytes": 102260
+    },
+    {
+      "path": "swarm-core/src/optimizer/mod.rs",
+      "sha256": "0C1EF30C5F4BA9E8493B8C455848785CC7B918AF9C0E8B3D77152B21E7E45956",
+      "bytes": 16631
+    },
+    {
+      "path": "swarm-core/src/optimizer/place_groups.rs",
+      "sha256": "67370912A0E4B0EEB4064A11F315759F65C84390D42DA7CA418BCEDAEB3768F6",
+      "bytes": 11631
+    },
+    {
+      "path": "swarm-core/src/optimizer/polish/holes.rs",
+      "sha256": "7E089A4C9ABF569E8F203AC8BB73911B73AAA3325085F839101700058659BFF4",
+      "bytes": 61292
+    },
+    {
+      "path": "swarm-core/src/optimizer/polish/lp.rs",
+      "sha256": "7D08F3CB382A0E57562C506C186F0D19B4998F4F470F159CE6CC71C5A71A8324",
+      "bytes": 82897
+    },
+    {
+      "path": "swarm-core/src/optimizer/polish/mod.rs",
+      "sha256": "280E78D3410B930879417E84F3DC9789F96D41942AF2F4681DDD68EB6EA83C16",
+      "bytes": 13784
+    },
+    {
+      "path": "swarm-core/src/optimizer/polish/probe.rs",
+      "sha256": "35F7B8D735A8A34F6696D71AF88D50CC1E69DCC8B328952B61EC7465E6BB08EF",
+      "bytes": 5003
+    },
+    {
+      "path": "swarm-core/src/optimizer/polish/slide.rs",
+      "sha256": "98D6C38D3A92FF35023EC55C4CD81A15F3CBE49D94A9F995E55A5CC0A377F4A8",
+      "bytes": 5105
+    },
+    {
+      "path": "swarm-core/src/optimizer/reclaim.rs",
+      "sha256": "AEC145AC530F16E5FB6933C413D23827D4CC9CE543204CFCF852F58E6AC9412D",
+      "bytes": 21835
+    },
+    {
+      "path": "swarm-core/src/optimizer/separator.rs",
+      "sha256": "1E72EF065E963157BB5ABE578BA56BE229E43B4C25582C16DD31012D0B13C984",
+      "bytes": 25353
+    },
+    {
+      "path": "swarm-core/src/optimizer/worker.rs",
+      "sha256": "6A291E57C93616341EDA52A03F2832072A262580BE50EFD68640CD20307CCF9F",
+      "bytes": 13398
+    },
+    {
+      "path": "swarm-core/src/quantify/mod.rs",
+      "sha256": "C50A2596B2D79B1C2050EEBF945C8924E3C2960FA7D15671F2EFEEEBCAC4FCA6",
+      "bytes": 2034
+    },
+    {
+      "path": "swarm-core/src/quantify/overlap_proxy.rs",
+      "sha256": "413E6247315A3084897969662A022851C76E158431DFFD1F68B3D33EA26C51D2",
+      "bytes": 1203
+    },
+    {
+      "path": "swarm-core/src/quantify/pair_matrix.rs",
+      "sha256": "E90882A3C796AF74B84CC7E07ACB75B6D0D09C03A1F04A578178F559CF2126E8",
+      "bytes": 1387
+    },
+    {
+      "path": "swarm-core/src/quantify/simd/circles_soa.rs",
+      "sha256": "6E19AF568BBEA07D24B19B1D8CBA47951D926911F318C551FC17337E8C5A6445",
+      "bytes": 1014
+    },
+    {
+      "path": "swarm-core/src/quantify/simd/mod.rs",
+      "sha256": "CDCF6A827A336B5DDBEC8B685B52503D79CFB08955CA3A55110ABCC35A68849E",
+      "bytes": 5694
+    },
+    {
+      "path": "swarm-core/src/quantify/simd/overlap_proxy_simd.rs",
+      "sha256": "E4E026CB4C7EEAD519F61ABCF0439C50FF55598BB106DFE19F15B7861476B2B0",
+      "bytes": 6734
+    },
+    {
+      "path": "swarm-core/src/quantify/tracker.rs",
+      "sha256": "6487AE3B140626B49A16487F1A1CFB1015B9AC42E135C91C12B9FD0235504E28",
+      "bytes": 14760
+    },
+    {
+      "path": "swarm-core/src/refplace/boundary.rs",
+      "sha256": "003A353603B780CFE603186866DF25B34381A129D72473824653AD0146C583DF",
+      "bytes": 22912
+    },
+    {
+      "path": "swarm-core/src/refplace/chain.rs",
+      "sha256": "844DE59A7D72EEDE44231AFB6C36DF83543B5D66460674C57BE55A2DE8BDB8BB",
+      "bytes": 35182
+    },
+    {
+      "path": "swarm-core/src/refplace/collect.rs",
+      "sha256": "9091EC334375F206267F8107300BC5153066133A80A7CD87AA199529817B4B18",
+      "bytes": 15869
+    },
+    {
+      "path": "swarm-core/src/refplace/columns.rs",
+      "sha256": "D5A8D09978BB0C9F16F6D0F64ED1C2F5534C4FA668B71D6C9D2EF62761C1EE45",
+      "bytes": 37527
+    },
+    {
+      "path": "swarm-core/src/refplace/driver.rs",
+      "sha256": "ACCFC46285AA90370D63E32320BEC8D9563DDDF86A8B12826E2CA71A9F271397",
+      "bytes": 41200
+    },
+    {
+      "path": "swarm-core/src/refplace/finish.rs",
+      "sha256": "D1558572D2C21FDC3E64EA8A2FEF5C6023593D06C746F0ADA0C964986D9B98A5",
+      "bytes": 18347
+    },
+    {
+      "path": "swarm-core/src/refplace/geom.rs",
+      "sha256": "DB182042D23963ABA0F01690AD23DFD8F218EE13E5AEA66E0D532CDE99F7F698",
+      "bytes": 30220
+    },
+    {
+      "path": "swarm-core/src/refplace/mod.rs",
+      "sha256": "1259F794D61C323C6473E6E2F5F48775A24707FEB7C2A80347324A26649B9A9D",
+      "bytes": 3282
+    },
+    {
+      "path": "swarm-core/src/refplace/params.rs",
+      "sha256": "81853D9A0B7A9740A7DC2AE340377E3B01124A714E3A3FEB480C66B4F4490611",
+      "bytes": 19422
+    },
+    {
+      "path": "swarm-core/src/refplace/post.rs",
+      "sha256": "F0FF664FF7432D683716B8B7F98A6FE1F2E70F242024C610DF971BC783A11BDB",
+      "bytes": 17748
+    },
+    {
+      "path": "swarm-core/src/refplace/record.rs",
+      "sha256": "EE77771783D4B0369A64EC39DCBE2AA709E94588E1D2DCB1A4A097CC0E4212AD",
+      "bytes": 20493
+    },
+    {
+      "path": "swarm-core/src/refplace/score.rs",
+      "sha256": "090E5039CAC1E966EC773D47E895F98E685ABC17569C7B378C58E0C203A1AD4D",
+      "bytes": 15086
+    },
+    {
+      "path": "swarm-core/src/refplace/step.rs",
+      "sha256": "8EA8636D19E1759308DE6B0D903776961980BEB5447078B88A254C76F5EDD08E",
+      "bytes": 16887
+    },
+    {
+      "path": "swarm-core/src/sample/best_samples.rs",
+      "sha256": "E37400AE5AC53BE734C0AF3E2EF1E9BB764BAFD466BC33C2492ED3EE3B1572CC",
+      "bytes": 4270
+    },
+    {
+      "path": "swarm-core/src/sample/coord_descent.rs",
+      "sha256": "747BA504CDB1E77D0ABA4E031FCEB10C01359DDF73E987E5DE977F91BE8EC451",
+      "bytes": 10065
+    },
+    {
+      "path": "swarm-core/src/sample/exact_nfp.rs",
+      "sha256": "9D5FD0950FA725010B99AF0EA9A7176B45C405C1CCCCF2FB6D72F7A9D6389D37",
+      "bytes": 6318
+    },
+    {
+      "path": "swarm-core/src/sample/mod.rs",
+      "sha256": "4E60D6207B03C9E74787F1D096A17693C2C8EC0939C5A13ACC960EC71ADCFD76",
+      "bytes": 494
+    },
+    {
+      "path": "swarm-core/src/sample/nfp_sampler.rs",
+      "sha256": "E48041D1CB98E4B71DAC536B1C49F7921FEEF937E01F23F14319375DBC416900",
+      "bytes": 50811
+    },
+    {
+      "path": "swarm-core/src/sample/raster_nfp.rs",
+      "sha256": "8D1887DBF6771C1188C63A29C6314F0A69653DDFB9478193C025EE8671C3D771",
+      "bytes": 32014
+    },
+    {
+      "path": "swarm-core/src/sample/search.rs",
+      "sha256": "8B62E3726A2AFDC7D8BAE50151F108421EB059ED9CBFA8DFD676B51B046C7122",
+      "bytes": 30637
+    },
+    {
+      "path": "swarm-core/src/sample/uniform_sampler.rs",
+      "sha256": "5D74498F8883D0C89C9003471A94530DB7F6AA981579E9B8BC8AE1339E66E8BB",
+      "bytes": 5671
+    },
+    {
+      "path": "swarm-core/src/structure/config.rs",
+      "sha256": "B63CC52CD00A159949373C5B510082BDCCFA6C6C8762B40CCBE4F01418647B99",
+      "bytes": 8187
+    },
+    {
+      "path": "swarm-core/src/structure/diagnostics.rs",
+      "sha256": "D6C5C8221A6EC7E4F2EA61CF25FCB62392E0B8D927D7EB5727158DCF17346CCC",
+      "bytes": 64726
+    },
+    {
+      "path": "swarm-core/src/structure/evaluator.rs",
+      "sha256": "E5C1E31473A1EA8A50D22FDFCDBA1DD79430CC7842B9E65A2EE36C8138C37C82",
+      "bytes": 16746
+    },
+    {
+      "path": "swarm-core/src/structure/mod.rs",
+      "sha256": "FDFC3A16485F877D1B62B134B502D0E0FA37ADF2A03A4A06023B9D7C3ABC7926",
+      "bytes": 371
+    },
+    {
+      "path": "swarm-core/src/structure/motif.rs",
+      "sha256": "B524B3CD179AFE5B136DE6E2B4671BADEDADDD76497893EDDFD58DF0AC3D4433",
+      "bytes": 130179
+    },
+    {
+      "path": "swarm-core/src/structure/pipeline.rs",
+      "sha256": "9AAB08ACE82F0EE3BA29F487A12549DE8D1F5FAC5F4667E6ABD4C6EB99D7023F",
+      "bytes": 74423
+    },
+    {
+      "path": "swarm-core/src/structure/profile.rs",
+      "sha256": "E2EABFEF28176AAFC8FB8039C73872D87D2C77EE78EEE901D4C8224CD39BA9BD",
+      "bytes": 40787
+    },
+    {
+      "path": "swarm-core/src/util/assertions.rs",
+      "sha256": "DC24BACB473CC93C2165F254DD5C4507C9659C7371455834193736377A464BC0",
+      "bytes": 10304
+    },
+    {
+      "path": "swarm-core/src/util/bit_reversal_iterator.rs",
+      "sha256": "C5FA357D821C13E6C564FC645B8CF58E9A13E82834BDACA12EB38B021619D651",
+      "bytes": 1394
+    },
+    {
+      "path": "swarm-core/src/util/ctrlc_terminator.rs",
+      "sha256": "D997093272C4843D39F63CCF669BD4EA64782E015042616E5976A159FE523955",
+      "bytes": 1470
+    },
+    {
+      "path": "swarm-core/src/util/io.rs",
+      "sha256": "447E720E2B3FF49B06110D7F479BE546459EC1BD969821FB74EAC08E67BA2C9B",
+      "bytes": 14275
+    },
+    {
+      "path": "swarm-core/src/util/listener.rs",
+      "sha256": "E065F0A53CD012F68DF96A45CE71D596D93D2862D6C6263B69A934ADC6F6992B",
+      "bytes": 900
+    },
+    {
+      "path": "swarm-core/src/util/mod.rs",
+      "sha256": "04505DD90FFE24061A5F7E2261B10FFE3DB0E14C6DD9E77B460D1007F69FB8E0",
+      "bytes": 194
+    },
+    {
+      "path": "swarm-core/src/util/simplify_mm.rs",
+      "sha256": "C3372606C9AAC71445DE955B450156360BD80BA87839D8EFE57A8E28F45F959C",
+      "bytes": 13427
+    },
+    {
+      "path": "swarm-core/src/util/terminator.rs",
+      "sha256": "DEB77ED0F7B39B56F50DA6A97946E8DD1BFEE3A91159861C5D58B99FD197D5F3",
+      "bytes": 1693
+    },
+    {
+      "path": "swarm-core/tests/postprocess_phases.rs",
+      "sha256": "384CA42A84854E7BBCF7CAFE0796FDCB00A5FFB95B9F4AF8CB132BC5E7F1E485",
+      "bytes": 16702
+    },
+    {
+      "path": "swarm-core/tests/stop_latency.rs",
+      "sha256": "729914D52F302BF62A97FE29AF0375CF8C35CF834087EE24A519983721356BED",
+      "bytes": 11511
+    },
+    {
+      "path": "swarm-nfp/Cargo.toml",
+      "sha256": "F42FB28B6C8C2B0331A8F703D21FD5A6ECA3FD4C35172C7CCAFDD72639486980",
+      "bytes": 384
+    },
+    {
+      "path": "swarm-nfp/src/backend.rs",
+      "sha256": "701271F5EB8C4EC4AEE68B8B07362B8F29CA4D9C239F26646B8694353A7770E8",
+      "bytes": 66078
+    },
+    {
+      "path": "swarm-nfp/src/complete.rs",
+      "sha256": "B912DB691FA56F993F12410545D0CF10492AC4081EBF0FBF684D0C9938DEC8F7",
+      "bytes": 3739
+    },
+    {
+      "path": "swarm-nfp/src/engine.rs",
+      "sha256": "FD28CC5FE81AB19BCA881D9A048EA4DAF65E52F5761EEF25BC3F0A59C7617A89",
+      "bytes": 33481
+    },
+    {
+      "path": "swarm-nfp/src/error.rs",
+      "sha256": "26BEFDFAF76570E44CE061C99A70D02F4D139875FD2DCF491ED8B02B11456879",
+      "bytes": 2990
+    },
+    {
+      "path": "swarm-nfp/src/lib.rs",
+      "sha256": "64F3CA48E0CB2C94039AFE7B1471E8D5C15E634EAFE7A6ACD3891F4551028C65",
+      "bytes": 1928
+    },
+    {
+      "path": "swarm-nfp/src/model.rs",
+      "sha256": "D9901D09BC414070C6FC2E28B20D15227ED72070D20787EFB3FCD21B5F68DD3F",
+      "bytes": 5286
+    },
+    {
+      "path": "swarm-nfp/src/prepare.rs",
+      "sha256": "F3E884675A1B40A2E91D2723C31AF86F562E2C616A3172301110553D0BF29F0B",
+      "bytes": 3231
+    },
+    {
+      "path": "src/ffi_log.rs",
+      "sha256": "08F3EBA0F5C272E2C143BE58D163E49028138397871FF158CFE93CEE6512D1B0",
+      "bytes": 9411
+    },
+    {
+      "path": "src/ffi_step.rs",
+      "sha256": "A6AE5B28BF09D9EA6F5F2DD4F94724907B989723CF9BF747C2D5A97B86B867CB",
+      "bytes": 212622
+    },
+    {
+      "path": "src/ffi.rs",
+      "sha256": "87D19C3E846B2D08EED7FC4F8ED6438BE127C658B3B7AC629277956E860916EC",
+      "bytes": 121429
+    },
+    {
+      "path": "src/grouped_engine.rs",
+      "sha256": "E67733691BD89045C58FD2CD2469DD97B414CAE1CB10F25A56E4DFF99B597BC0",
+      "bytes": 179179
+    },
+    {
+      "path": "src/grouped_input.rs",
+      "sha256": "9903DF96BAC50A9B5BC56CB1FC178B1089F4418DEDD326C601E95B63589CFB92",
+      "bytes": 21524
+    },
+    {
+      "path": "src/jni_glue.rs",
+      "sha256": "B50B1E6D7CB768809FDD8438CEF8354A3361C209E6BAE8C8FBF12D584F24D1D4",
+      "bytes": 21150
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "0DF8CB3EB59746188FA708DA22AFFBD47D7F6E8FCA9234D585DA805661F976DF",
+      "bytes": 185
+    }
+  ]
+}

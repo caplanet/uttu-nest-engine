@@ -1,0 +1,1 @@
+{"_note":"축소 직후 재배열 + 밴드 전체 + 착석률 60% 미만이면 롤백","band_rearrange.post_shrink":1,"band_rearrange.full_band":1,"band_rearrange.min_clear_reinsert_ratio":0.60}

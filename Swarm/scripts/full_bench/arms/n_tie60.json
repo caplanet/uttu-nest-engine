@@ -1,0 +1,1 @@
+{"_note":"NFP-LBF + 길이 동률 60mm 안에서 맞물림 품질로 선택","nfp_lbf.enabled":1,"nfp_lbf.n_orderings":20,"nfp_lbf.total_budget_ms":15000,"nfp_lbf.cache_budget_ms":5000,"constructor.nfp_length_tie_mm":60.0}

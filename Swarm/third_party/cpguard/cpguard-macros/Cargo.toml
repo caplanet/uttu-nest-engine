@@ -1,0 +1,16 @@
+[package]
+name = "cpguard-macros"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Procedural macros for cpguard (control-flow obfuscation, string encryption)."
+repository = "https://github.com/mwlee-caplanet/DeCompileDefense"
+license = "MIT OR Apache-2.0"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0.90", features = ["full"] }
+quote = "1.0.37"
+proc-macro2 = "1.0.92"

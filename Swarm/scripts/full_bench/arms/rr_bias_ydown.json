@@ -1,0 +1,1 @@
+{"_note":"재삽입 편향 (1,10) 아래우선 — 좌측우선 (10,1) 이 loss 폭증 원인인지 검증","band_rearrange.post_shrink":1,"band_rearrange.full_band":1,"band_rearrange.max_loss_growth":2.0,"band_rearrange.recreate_x_mult":1.0,"band_rearrange.recreate_y_mult":10.0}

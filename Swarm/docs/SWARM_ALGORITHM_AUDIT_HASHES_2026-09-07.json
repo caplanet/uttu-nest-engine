@@ -1,0 +1,186 @@
+{
+  "workspace": "C:\\Caplanet\\AiWorks\\AdaptiveAlgorithm2",
+  "baseline": "C:\\Caplanet\\AiWorks\\AdaptiveAlgorithm2\\target\\algorithm-audit-baseline-2026-09-07",
+  "changes": [
+    {
+      "path": "swarm-core/src/initial/raster.rs",
+      "before_sha256": "df5e28974b767a5faeabec290c539adaf7852cd53821872beefd489f1585d7e6",
+      "after_sha256": "6e339e75f3cd56751031ed7dbbb759dd58788b63c20e2c7d1e2bbdb222c5f3df"
+    },
+    {
+      "path": "swarm-core/src/lp_solver/clarabel_backend.rs",
+      "before_sha256": "c14b2ab0613d43a85400c047902ada41d9b54161a1c608b6f1282c573dcb2808",
+      "after_sha256": "e011ef7e024d3eeb36dc1d0c61ea23b6522282858f19050b83a09717eb70ea3a"
+    },
+    {
+      "path": "swarm-core/src/lp_solver/clp.rs",
+      "before_sha256": "eeeee683535effda22eadb33ec9febdbfdf7a933e16b9355b7aa8b3c8c17f878",
+      "after_sha256": "ac7ccd14df4d56ef2bb49922a5364e9ca823b01d1c5a2c7ba40d6b4fe16edd8c"
+    },
+    {
+      "path": "swarm-core/src/lp_solver/microlp_backend.rs",
+      "before_sha256": "a9b55f73e0ed14d9211ffb24e5923a775e85576cabc0fd470f2ca53bf0f1a187",
+      "after_sha256": "7ca9f620d52c8b43f873da9706423609c0375729bc6600422d3d27f08601df75"
+    },
+    {
+      "path": "swarm-core/src/lp_solver/mod.rs",
+      "before_sha256": "829988844559413c52cdc88d402ae8d42c2acd34934659d5af8d82ef546a0bf7",
+      "after_sha256": "115fa68085f1d8ce74460920568fef7e533d0413f03112e9a3d8ea043fb9fa4f"
+    },
+    {
+      "path": "swarm-core/src/lp_solver/xpress.rs",
+      "before_sha256": "47c864c7b8c850e8370d912dabe7971da9044ae9577948930a4e863c009d1bf0",
+      "after_sha256": "6d104019dc3e359c56ae3fa132336f28dc40c613203d45330b3f46b0fe64b9f2"
+    },
+    {
+      "path": "swarm-core/src/optimizer/place_groups.rs",
+      "before_sha256": "67370912a0e4b0eeb4064a11f315759f65c84390d42da7ca418bcedaeb3768f6",
+      "after_sha256": "107317110a395b97f40d834d84ebf3eda16c9097e486e258aaa77a0921609651"
+    },
+    {
+      "path": "swarm-core/src/sample/uniform_sampler.rs",
+      "before_sha256": "5d74498f8883d0c89c9003471a94530db7f6aa981579e9b8bc8ae1339e66e8bb",
+      "after_sha256": "1f4d300999bf00c85f01aa4f52abf7ca6ea1eaed8adad90a76faba451e1f9f17"
+    },
+    {
+      "path": "swarm-core/tests/algorithm_audit.rs",
+      "before_sha256": null,
+      "after_sha256": "4f31c2f9d75c61a72804400dad3ae89bbfa764d83fb3eef9886470723a234035"
+    },
+    {
+      "path": "swarm-core/tests/lbf_order_feasibility.rs",
+      "before_sha256": "551b9f586331e343a260e6b0a41a33b8eb843ee9d7fecd9142e647afcf621c00",
+      "after_sha256": "2d70fb81fcaab5b9e472a75a65e7e229e615f2c582de9520a33ac2c79d663090"
+    },
+    {
+      "path": "src/grouped_engine.rs",
+      "before_sha256": "f788c72c9875ed70fb757667a5de33c2291c2937b5f2efd28fc0e0d6b544ff5d",
+      "after_sha256": "3a6fcbc1cbc0ac7f0702642a98459afb1a2931d870584aff9b66ec09e7b26161"
+    }
+  ],
+  "unchanged_contract_and_configuration": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "f2f80565f2a1b0264618190e18a3bb06ed468f7c4099fcd8b5eac0d06c7e1736"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "0fa668a5b5b42132cb0863d73a5fc433af994dbcf877900ab7b4baed0d4044dd"
+    },
+    {
+      "path": "include/swarm.h",
+      "sha256": "8c0a356e2550d7d2733890cfdb42ac35b277961b667ab1e4b6301b60f50d2492"
+    },
+    {
+      "path": "swarm-core/Cargo.toml",
+      "sha256": "d21a9f63628fc4eab9923ff1fcddf994340e564f150d2c8a955f255914bb3927"
+    },
+    {
+      "path": "swarm-core/src/config.rs",
+      "sha256": "38b108241285fd8671cdede421955b7cebb37d5cb17f367bfff65e1cc8d19661"
+    },
+    {
+      "path": "swarm-core/src/consts.rs",
+      "sha256": "b942b2a1ac928f51767c99d19585ec9b0b7742d8089ae8724156b9ff64099a98"
+    },
+    {
+      "path": "swarm-core/src/nfp_strategy/config.rs",
+      "sha256": "1e7c60de7dc9b0fd7a88fe84c0a2aa8eb9df9bd14276d51a3c82865492ba8ee6"
+    },
+    {
+      "path": "swarm-core/src/structure/config.rs",
+      "sha256": "b63cc52cd00a159949373c5b510082bdccfa6c6c8762b40ccbe4f01418647b99"
+    },
+    {
+      "path": "swarm-nfp/Cargo.toml",
+      "sha256": "f42fb28b6c8c2b0331a8f703d21fd5a6eca3fd4c35172c7ccafdd72639486980"
+    },
+    {
+      "path": "swarm-wasm/Cargo.toml",
+      "sha256": "8fa9b0c932e6633c01a18cff814e0a363bf31d9f5121dfcd4d25b07cd1da6fa7"
+    },
+    {
+      "path": "src/ffi.rs",
+      "sha256": "87d19c3e846b2d08eed7fc4f8ed6438be127c658b3b7ac629277956e860916ec"
+    }
+  ],
+  "tests": {
+    "core-final": {
+      "log": "target/algorithm-audit-core-final.log",
+      "suites": 41,
+      "totals": {
+        "passed": 821,
+        "failed": 0,
+        "ignored": 80
+      }
+    },
+    "ffi-final": {
+      "log": "target/algorithm-audit-ffi-final.log",
+      "suites": 10,
+      "totals": {
+        "passed": 142,
+        "failed": 0,
+        "ignored": 3
+      }
+    },
+    "classic": {
+      "log": "target/algorithm-audit-classic.log",
+      "suites": 3,
+      "totals": {
+        "passed": 669,
+        "failed": 0,
+        "ignored": 13
+      }
+    },
+    "classic-stop": {
+      "log": "target/algorithm-audit-classic-stop.log",
+      "suites": 1,
+      "totals": {
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "nfp-baseline": {
+      "log": "target/algorithm-audit-nfp-baseline.log",
+      "suites": 5,
+      "totals": {
+        "passed": 46,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "lbf-modes": {
+      "log": "target/algorithm-audit-lbf-modes.log",
+      "suites": 1,
+      "totals": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "release-frozen": {
+      "log": "target/algorithm-audit-release-frozen.log",
+      "suites": 1,
+      "totals": {
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      }
+    }
+  },
+  "patch_sha256": "14a374dfea037f25c9531487051037705b8696e50f4f1176b05f8ed0e3127421",
+  "report_sha256": "a2169bb79135c150aa54fabf4d521b5237d2181efe6ac972edb60fa59eef958c",
+  "release": {
+    "dll": "C:\\Caplanet\\AiWorks\\AdaptiveAlgorithm2\\target\\release\\capswarmcore_100.dll",
+    "sha256": "476b2efe42d46b514e8b7af027b5c37afc651af259be3d143802e39c54e190de",
+    "bytes": 6351872,
+    "return_code": 0,
+    "abi": {
+      "version": 15,
+      "config_size": 776,
+      "structure_size": 116,
+      "features": 15
+    }
+  }
+}

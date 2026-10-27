@@ -1,0 +1,1 @@
+{"_note":"P0-P5 structure-first 파이프라인이 Explore 를 대체. 480초를 P1 구성 60초 + P2 압축 + P3 탐색 + P4 복구로 배분","structure_first.enabled":1,"structure_first.p1_time_limit_secs":60,"structure_first.p2_time_limit_secs":40,"structure_first.p3_time_limit_secs":260,"structure_first.p4_cycles":3,"structure_first.p4_cycle_time_limit_secs":30}

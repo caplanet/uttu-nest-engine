@@ -1,0 +1,1 @@
+{"_note":"NFP-LBF + 가중합 우선 선택 (접촉·낭비가 실제로 자리를 고른다)","nfp_lbf.enabled":1,"nfp_lbf.n_orderings":20,"nfp_lbf.total_budget_ms":15000,"nfp_lbf.cache_budget_ms":5000,"constructor.nfp_score_first":1}

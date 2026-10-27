@@ -1,0 +1,100 @@
+{
+  "captured_at": "2026-09-07T10:10:40.441581+00:00",
+  "workspace": "C:\\Caplanet\\AiWorks\\AdaptiveAlgorithm2",
+  "baseline": "C:\\Caplanet\\AiWorks\\AdaptiveAlgorithm2\\target\\explore-code-baseline-2026-09-07",
+  "features": [
+    "simd",
+    "capmods",
+    "adaptive",
+    "structure-first"
+  ],
+  "changed_files": [
+    {
+      "path": "swarm-core/src/escape/conflict_burst.rs",
+      "before_sha256": "c8e846ae57a75fc67bf794ea43df61e3d3496b416ed2de352172719211ce220c",
+      "after_sha256": "7c32373f62b90751e97107248a4d501d5b7e7d5f9791599c7f3ecf9a6436b003"
+    },
+    {
+      "path": "swarm-core/src/escape/guided.rs",
+      "before_sha256": "b88280ee4f30c9aaaa4ffbad06645513c04fbafba0a19a05e3b8308401b5abd0",
+      "after_sha256": "19a8f365ff104ffbfaf2ed586150f99b685e7992e43e48e615315a1ad6dd3326"
+    },
+    {
+      "path": "swarm-core/src/eval/sep_evaluator.rs",
+      "before_sha256": "1060f64d6289a6b6dad8537d71698d69c9260bf2f56c40a7e888334c407afaf7",
+      "after_sha256": "2a96199d8a765c59bbb9fe0a7749bb46e6800173cdcad10959748c9c675ea540"
+    },
+    {
+      "path": "swarm-core/src/eval/specialized_jaguars_pipeline.rs",
+      "before_sha256": "40e9868397bb647076c532e879a45875e904a0b8a8e330c5b898661174dd4a50",
+      "after_sha256": "5ea9379b93fb98756c019caade16a8cc7c268e97932f5e48e85393a8dba73852"
+    },
+    {
+      "path": "swarm-core/src/optimizer/separator.rs",
+      "before_sha256": "db8b0a1151d398693398285c84da46fad263aab929cbaf97ee79991e499c601d",
+      "after_sha256": "62dcd421eb0e339507b5eb3705af49d9596d5f1fc5e70726f3959a38f7566343"
+    },
+    {
+      "path": "swarm-core/src/optimizer/worker.rs",
+      "before_sha256": "10881b083405247b67d039f93547e308b5a9534a3e87946a398e3d4f33ac07b6",
+      "after_sha256": "52de08b565252d0fccf21ec0974c99d31a9a4dd2d63ea8499eb3e98b724cd45f"
+    },
+    {
+      "path": "swarm-core/src/quantify/simd/mod.rs",
+      "before_sha256": "cdcf6a827a336b5ddbec8b685b52503d79cfb08955ca3a55110abcc35a68849e",
+      "after_sha256": "59f477414d5fe00828a6b1a32842a87412bfa6f5a107a4b9c5c35dcd415f01b1"
+    },
+    {
+      "path": "swarm-core/src/quantify/simd/overlap_proxy_simd.rs",
+      "before_sha256": "e4e026cb4c7eead519f61abcf0439c50ff55598bb106dfe19f15b7861476b2b0",
+      "after_sha256": "8ee9390ffac617ffd565769c8caeae80689949ad56e24c5c1671f7514a233b7f"
+    },
+    {
+      "path": "swarm-core/src/quantify/tracker.rs",
+      "before_sha256": "6487ae3b140626b49a16487f1a1cfb1015b9ac42e135c91c12b9fd0235504e28",
+      "after_sha256": "070e7b02684f1f279cec45f5b17945fceee572b6c2eecf261517893d334e532f"
+    },
+    {
+      "path": "swarm-core/tests/lns_smoke.rs",
+      "before_sha256": "0ff54eb4c06929f97639cc5746ebfcdd9c5617dd57187205e16f6f78b4e0e2a0",
+      "after_sha256": "4d22a5cd9a9aab8ebec5a0856bf1f2b30366964c73aee86c075fba57489cf440"
+    },
+    {
+      "path": "src/grouped_engine.rs",
+      "before_sha256": "e7f06786e6032703a95414c993d77fcbe15535358da5a9849774fa3e4a1181de",
+      "after_sha256": "a5642a2ee146cbe6438f7044fc8fbb93e8c71ae4287d0ba1b1d04dea17e315e8"
+    },
+    {
+      "path": "swarm-core/tests/explore_code_optimization.rs",
+      "before_sha256": null,
+      "after_sha256": "f890f56110b9afa69843b685631cf175803a512a05127cde54f44e6cd60f5e54"
+    }
+  ],
+  "unchanged_configuration": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "0fa668a5b5b42132cb0863d73a5fc433af994dbcf877900ab7b4baed0d4044dd"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "f2f80565f2a1b0264618190e18a3bb06ed468f7c4099fcd8b5eac0d06c7e1736"
+    },
+    {
+      "path": "swarm-core/Cargo.toml",
+      "sha256": "d21a9f63628fc4eab9923ff1fcddf994340e564f150d2c8a955f255914bb3927"
+    },
+    {
+      "path": "swarm-core/src/config.rs",
+      "sha256": "38b108241285fd8671cdede421955b7cebb37d5cb17f367bfff65e1cc8d19661"
+    },
+    {
+      "path": "swarm-core/src/consts.rs",
+      "sha256": "b942b2a1ac928f51767c99d19585ec9b0b7742d8089ae8724156b9ff64099a98"
+    }
+  ],
+  "dll": {
+    "path": "C:\\Caplanet\\AiWorks\\AdaptiveAlgorithm2\\target\\release\\capswarmcore_100.dll",
+    "bytes": 6309376,
+    "sha256": "ea777fd5958b25e9ba0ed1763e012b97f79d4dbeae6be8685a313cbc372d3512"
+  }
+}

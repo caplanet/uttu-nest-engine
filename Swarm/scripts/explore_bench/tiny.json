@@ -1,0 +1,1 @@
+{"name":"explore-bench-smoke","strip_height":100,"items":[{"id":0,"demand":2,"allowed_orientations":[0],"shape":{"type":"simple_polygon","data":[[0,0],[35,0],[35,40],[0,40]]}},{"id":1,"demand":1,"allowed_orientations":[0],"shape":{"type":"simple_polygon","data":[[0,0],[25,0],[25,30],[0,30]]}}]}

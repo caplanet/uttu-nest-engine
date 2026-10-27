@@ -1,0 +1,1 @@
+{"_note":"폭 완화 복구 켜기: 같은 폭 4회 연속 실패 시 폭을 넓혀 매듭을 풀고 재개","width_relief.fail_threshold":4,"width_relief.step":0.002,"width_relief.max_ratio":0.03,"width_relief.max_rounds":12,"width_relief.strike_limit":1,"width_relief.round_budget_ms":2000}

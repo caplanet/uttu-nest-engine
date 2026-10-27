@@ -1,0 +1,2255 @@
+--- swarm-core\src\escape\conflict_burst.rs
++++ swarm-core\src\escape\conflict_burst.rs
+@@ -1106,8 +1106,7 @@
+ 
+             ConflictEscapeScoreTerms {
+                 collision_degree: (adjacency[i].len() as f32 / max_degree).clamp(0.0, 1.0),
+-                strip_boundary_contribution: ((bbox.x_max - strip.x_min) / strip_w)
+-                    .clamp(0.0, 1.0),
++                strip_boundary_contribution: ((bbox.x_max - strip.x_min) / strip_w).clamp(0.0, 1.0),
+                 blocking_score: (0.5 * elongation + 0.5 * relative_size).clamp(0.0, 1.0),
+                 area: (area / max_area).clamp(0.0, 1.0),
+                 concavity: (1.0 - area / bbox.area().max(GEOM_EPS)).clamp(0.0, 1.0),
+@@ -1248,7 +1247,7 @@
+ /// 각 Stage 후 loss가 0이면 조기 종료한다. `term`이 중단을 요청하거나, 해소되지 않은 채
+ /// 시작보다 loss가 나빠지면 폭까지 포함해 호출 전 상태로 전부 되돌린다.
+ ///
+-/// `sep.has_place_groups()`면 [`ruin_and_recreate`]가 no-op이므로 Stage 3를 건너뛰고
++/// 개별 이동 가능한 조각이 없으면 Stage 3를 건너뛰고
+ /// Stage 1+2만 수행한다.
+ pub fn conflict_burst_partial_rebuild(
+     sep: &mut Separator,
+@@ -1330,10 +1329,7 @@
+         outcome.resolved = true;
+         outcome.final_width = sep.prob.strip_width();
+         outcome.collision_ratio_after = ConflictGraph::collision_ratio_of(sep);
+-        info!(
+-            "[BURST] resolved after stage 1 (pushed {})",
+-            outcome.pushed
+-        );
++        info!("[BURST] resolved after stage 1 (pushed {})", outcome.pushed);
+         return outcome;
+     }
+ 
+@@ -1364,8 +1360,14 @@
+ 
+     // ── Stage 3 — Destroy & Repair ──────────────────────────────────────────
+     if sep.ct.get_total_loss() > 0.0 {
+-        if sep.has_place_groups() {
+-            debug!("[BURST] rigid place groups active; stage 3 skipped");
++        if !sep
++            .prob
++            .layout
++            .placed_items
++            .values()
++            .any(|pi| sep.can_move_individually(pi.item_id))
++        {
++            debug!("[BURST] no ungrouped movable items; stage 3 skipped");
+         } else {
+             outcome.stages.push(ConflictBurstStage::DestroyAndRepair);
+             let remove_ratio = lerp_ratio((cfg.remove_ratio_min, cfg.remove_ratio_max), t);
+@@ -1377,7 +1379,8 @@
+                 max_items,
+             };
+             // 실제 제거·재삽입은 검증된 repair 경로에 위임한다.
+-            let destroyed = ruin_and_recreate(sep, &burst_rnr, RuinStrategy::Fragmented, tabu, term);
++            let destroyed =
++                ruin_and_recreate(sep, &burst_rnr, RuinStrategy::Fragmented, tabu, term);
+             outcome.destroyed = destroyed;
+             // R&R은 제거한 아이템을 전부 다시 삽입한다 (자리가 없으면 원위치 폴백).
+             outcome.repaired = destroyed;
+@@ -1505,13 +1508,7 @@
+             break;
+         }
+         // 앞선 (그룹) 이동으로 키가 사라졌을 수 있다.
+-        let Some(current) = sep
+-            .prob
+-            .layout
+-            .placed_items
+-            .get(pk)
+-            .map(|pi| pi.d_transf)
+-        else {
++        let Some(current) = sep.prob.layout.placed_items.get(pk).map(|pi| pi.d_transf) else {
+             continue;
+         };
+         let target = current.compose().translate((dx, dy)).decompose();
+@@ -1967,9 +1964,7 @@
+     /// 정점 목록으로 outer ring 하나짜리 `PolygonSet`을 만든다.
+     fn poly(vertices: &[(f64, f64)]) -> PolygonSet {
+         PolygonSet::from_outer(Ring::new(
+-            vertices
+-                .iter()
+-                .map(|&(x, y)| swarm_nfp::Point::new(x, y)),
++            vertices.iter().map(|&(x, y)| swarm_nfp::Point::new(x, y)),
+         ))
+     }
+ 
+@@ -2035,7 +2030,11 @@
+         assert_eq!(graph.stored_separation(b, a), Some((-3.0, 4.0)));
+ 
+         // NFP를 못 얻은 edge는 None → 호출부가 bbox MTV로 폴백한다.
+-        let fallback = graph_of(vec![a, b], vec![vec![1], vec![0]], vec![vec![None], vec![None]]);
++        let fallback = graph_of(
++            vec![a, b],
++            vec![vec![1], vec![0]],
++            vec![vec![None], vec![None]],
++        );
+         assert_eq!(fallback.stored_separation(a, b), None);
+ 
+         // 충돌 edge가 아닌 쌍도 저장값이 없다.
+@@ -2052,11 +2051,7 @@
+         let ccw = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+         let cw: Vec<(f64, f64)> = ccw.iter().rev().copied().collect();
+         for verts in [ccw.to_vec(), cw] {
+-            let ring = Ring::new(
+-                verts
+-                    .iter()
+-                    .map(|&(x, y)| swarm_nfp::Point::new(x, y)),
+-            );
++            let ring = Ring::new(verts.iter().map(|&(x, y)| swarm_nfp::Point::new(x, y)));
+             assert!(point_in_ring(&ring, 5.0, 5.0));
+             assert!(!point_in_ring(&ring, 15.0, 5.0));
+             assert!(!point_in_ring(&ring, 5.0, -0.5));
+@@ -2175,7 +2170,12 @@
+     use super::*;
+ 
+     /// 스칼라 경로 결과.
+-    fn scalar(data: &[CTEntry], size: usize, nodes: &[u32], n: usize) -> (Vec<(u32, u32)>, Vec<u32>) {
++    fn scalar(
++        data: &[CTEntry],
++        size: usize,
++        nodes: &[u32],
++        n: usize,
++    ) -> (Vec<(u32, u32)>, Vec<u32>) {
+         let mut edges = Vec::new();
+         let mut deg = vec![0u32; n];
+         scan_rows_with(
+@@ -2217,7 +2217,9 @@
+ 
+     /// 결정적인 유사 난수 (테스트 재현성 확보용).
+     fn lcg(state: &mut u64) -> u32 {
+-        *state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
++        *state = state
++            .wrapping_mul(6_364_136_223_846_793_005)
++            .wrapping_add(1);
+         (*state >> 33) as u32
+     }
+ 
+@@ -2242,9 +2244,21 @@
+                 let nodes: Vec<u32> = (0..size as u32).collect();
+ 
+                 let expected = scalar(&data, size, &nodes, size);
+-                assert_eq!(simd_w::<4>(&data, size, &nodes, size), expected, "W=4 size={size} d={density}");
+-                assert_eq!(simd_w::<8>(&data, size, &nodes, size), expected, "W=8 size={size} d={density}");
+-                assert_eq!(simd_w::<16>(&data, size, &nodes, size), expected, "W=16 size={size} d={density}");
++                assert_eq!(
++                    simd_w::<4>(&data, size, &nodes, size),
++                    expected,
++                    "W=4 size={size} d={density}"
++                );
++                assert_eq!(
++                    simd_w::<8>(&data, size, &nodes, size),
++                    expected,
++                    "W=8 size={size} d={density}"
++                );
++                assert_eq!(
++                    simd_w::<16>(&data, size, &nodes, size),
++                    expected,
++                    "W=16 size={size} d={density}"
++                );
+                 assert_eq!(
+                     simd_dispatch(&data, size, &nodes, size),
+                     expected,
+--- swarm-core\src\escape\levels.rs
++++ swarm-core\src\escape\levels.rs
+@@ -214,24 +214,12 @@
+ 
+     match level {
+         EscapeLevel::Soft => apply_soft_escape(sep, analysis, intensity, &mut outcome),
+-        EscapeLevel::Medium => apply_medium_escape(
+-            sep,
+-            analysis,
+-            intensity,
+-            rnr_cfg,
+-            tabu,
+-            term,
+-            &mut outcome,
+-        ),
+-        EscapeLevel::Hard => apply_hard_escape(
+-            sep,
+-            analysis,
+-            intensity,
+-            rnr_cfg,
+-            tabu,
+-            term,
+-            &mut outcome,
+-        ),
++        EscapeLevel::Medium => {
++            apply_medium_escape(sep, analysis, intensity, rnr_cfg, tabu, term, &mut outcome)
++        }
++        EscapeLevel::Hard => {
++            apply_hard_escape(sep, analysis, intensity, rnr_cfg, tabu, term, &mut outcome)
++        }
+     }
+ 
+     // ── 트랜잭션 종료: 중단되었거나 아무 것도 못 했으면 통째로 롤백 ──
+@@ -354,7 +342,11 @@
+ 
+ /// 두 패턴의 평행이동을 맞바꾼다. 각자의 회전은 허용 각도를 지키도록 그대로 둔다.
+ /// 교환 후 총 loss가 나빠지면 되돌리고 `None`을 돌려준다.
+-fn swap_translations(sep: &mut Separator, a: PItemKey, b: PItemKey) -> Option<(PItemKey, PItemKey)> {
++fn swap_translations(
++    sep: &mut Separator,
++    a: PItemKey,
++    b: PItemKey,
++) -> Option<(PItemKey, PItemKey)> {
+     if a == b {
+         return None;
+     }
+@@ -392,11 +384,7 @@
+ 
+ /// 허용 각도 내 회전. `RotationRange::Discrete`면 그 집합 안에서만 고르고
+ /// (의류 패턴의 `0°/180°`), `Continuous`면 [`L1_TILT_LADDER_DEG`]의 미세 Tilt를 쓴다.
+-fn rotate_within_allowed(
+-    sep: &mut Separator,
+-    pk: PItemKey,
+-    intensity: f32,
+-) -> Option<PItemKey> {
++fn rotate_within_allowed(sep: &mut Separator, pk: PItemKey, intensity: f32) -> Option<PItemKey> {
+     let (dt, item_id) = {
+         let pi = sep.prob.layout.placed_items.get(pk)?;
+         (pi.d_transf, pi.item_id)
+@@ -484,20 +472,23 @@
+     term: &impl crate::util::terminator::Terminator,
+     outcome: &mut EscapeOutcome,
+ ) {
+-    // R&R은 rigid place group이 걸려 있으면 no-op이다. 그 경우 Level 1 동작으로 대체한다.
+-    if sep.has_place_groups() {
+-        debug!("[ESC-L2] rigid place group 활성 → Level 1 동작으로 대체");
++    if !sep
++        .prob
++        .layout
++        .placed_items
++        .values()
++        .any(|pi| sep.can_move_individually(pi.item_id))
++    {
+         apply_soft_escape(sep, analysis, intensity, outcome);
+         return;
+     }
+-
+     let ratio = lerp_ratio((L2_RATIO_MIN, L2_RATIO_MAX), intensity);
+     let bottlenecks: Vec<(PItemKey, Rect)> = analysis
+         .top_ratio(ratio)
+         .iter()
+         .filter_map(|t| {
+             let pi = sep.prob.layout.placed_items.get(t.pk)?;
+-            (!is_frozen(sep, pi.item_id)).then_some((t.pk, pi.shape.bbox))
++            (sep.can_move_individually(pi.item_id)).then_some((t.pk, pi.shape.bbox))
+         })
+         .collect();
+     if bottlenecks.is_empty() {
+@@ -539,7 +530,7 @@
+             .placed_items
+             .iter()
+             .filter(|(other_pk, pi)| {
+-                *other_pk != pk && !seen.contains(other_pk) && !is_frozen(sep, pi.item_id)
++                *other_pk != pk && !seen.contains(other_pk) && sep.can_move_individually(pi.item_id)
+             })
+             .filter(|(_, pi)| rects_overlap(halo, pi.shape.bbox))
+             .map(|(other_pk, pi)| (other_pk, pi.shape.bbox))
+@@ -552,7 +543,11 @@
+             if !seen.insert(other_pk) {
+                 continue;
+             }
+-            let step = step_away(centre, centre_of(other_bbox), diagonal_of(other_bbox) * frac);
++            let step = step_away(
++                centre,
++                centre_of(other_bbox),
++                diagonal_of(other_bbox) * frac,
++            );
+             plan.push((other_pk, step));
+         }
+     }
+@@ -623,12 +618,16 @@
+     term: &impl crate::util::terminator::Terminator,
+     outcome: &mut EscapeOutcome,
+ ) {
+-    if sep.has_place_groups() {
+-        debug!("[ESC-L3] rigid place group 활성 → Level 1 동작으로 대체");
++    if !sep
++        .prob
++        .layout
++        .placed_items
++        .values()
++        .any(|pi| sep.can_move_individually(pi.item_id))
++    {
+         apply_soft_escape(sep, analysis, intensity, outcome);
+         return;
+     }
+-
+     // ① 유지 영역 경계. strip 폭을 x축 길이로 보고 왼쪽부터 보존한다.
+     let strip_length = if analysis.strip_length.is_finite() && analysis.strip_length > 0.0 {
+         analysis.strip_length
+@@ -642,7 +641,7 @@
+     //                 + 가장 큰 내부 공백 주변 아이템
+     let mut rebuild_ids: HashSet<usize> = HashSet::new();
+     for (_, pi) in sep.prob.layout.placed_items.iter() {
+-        if is_frozen(sep, pi.item_id) {
++        if !sep.can_move_individually(pi.item_id) {
+             continue;
+         }
+         let bbox = pi.shape.bbox;
+--- swarm-core\src\escape\pipeline.rs
++++ swarm-core\src\escape\pipeline.rs
+@@ -295,6 +295,7 @@
+     escape_config: &AdaptiveEscapeConfig,
+     nfp_cfg: &crate::config::NfpIntegrationConfig,
+ ) -> Vec<SPSolution> {
++    sep.configure_reinsertion(nfp_cfg);
+     let _run_scope = crate::config::runtime::enter_if_unset(sep.run_control.clone());
+     // 분리 벡터용 NFP 캐시. 플래그가 꺼져 있으면 만들지 않는다.
+     let mut nfp_sep_cache = nfp_cfg
+@@ -331,11 +332,17 @@
+     let mut best_width = current_width;
+     let mut best_efficiency = sep.prob.density();
+ 
+-    let mut feasible_sols = vec![sep.prob.save()];
++    let initial_solution = sep.prob.save();
++    let initial_certified = sep.solution_is_certified(&initial_solution, &initial_solution);
++    let mut feasible_sols = if initial_certified {
++        vec![initial_solution.clone()]
++    } else {
++        vec![]
++    };
+     // 진입 레이아웃을 **검사 없이** ExplFeas 로 보고하면 안 된다. ExplFeas 는
+     // "겹침 없음" 을 뜻하고, 소비자는 그 라벨을 믿고 배치를 그린다.
+     if let Some(l) = sol_listener.as_deref_mut()
+-        && sep.ct.get_total_loss() == 0.0
++        && initial_certified
+     {
+         l.report(ReportType::ExplFeas, &feasible_sols[0], instance);
+     }
+@@ -371,7 +378,14 @@
+         // ── ① swarm_step() ───────────────────────────────────────────────
+         let (local_sol, local_ct) = sep.separate(term, sol_listener);
+         let total_loss = local_ct.get_total_loss();
+-        let feasible = total_loss == 0.0;
++        let feasible =
++            total_loss == 0.0 && sep.solution_is_certified(&local_sol, &initial_solution);
++        if total_loss == 0.0 && !feasible {
++            log::warn!(
++                "[ESCAPE] zero-loss candidate failed exact certification; retaining incumbent"
++            );
++            break;
++        }
+ 
+         // `separate`는 최선 해를 반환할 뿐 separator를 그 상태로 되돌리지 않는다.
+         // 뒤따르는 압축/관찰이 실제 최선 해를 보도록 여기서 명시적으로 맞춘다.
+@@ -413,7 +427,7 @@
+ 
+         if feasible {
+             // ── feasible: 인컴번트 갱신 후 폭을 줄여 다시 도전한다 ────────
+-            if current_width < best_width {
++            if current_width < best_width || feasible_sols.is_empty() {
+                 best_width = current_width;
+                 let sol = sep.prob.save();
+                 info!(
+@@ -770,6 +784,8 @@
+             * 100.0
+     );
+ 
++    // Never leave a caller looking at a last, unrepaired perturbation.
++    sep.rollback(feasible_sols.last().unwrap_or(&initial_solution), None);
+     feasible_sols
+ }
+ 
+--- swarm-core\src\optimizer\compress.rs
++++ swarm-core\src\optimizer\compress.rs
+@@ -81,6 +81,7 @@
+         best_sol.density(instance) * 100.0,
+         (best_sol.density(instance) - init_sol.density(instance)) * 100.0
+     );
++    sep.rollback(&best_sol, None);
+     best_sol
+ }
+ 
+@@ -113,7 +114,7 @@
+ 
+     // Try to separate layout, if all collisions are eliminated, return the solution
+     let (compacted_sol, ot) = sep.separate(term, sol_listener);
+-    match ot.get_total_loss() == 0.0 {
++    match ot.get_total_loss() == 0.0 && sep.solution_is_certified(&compacted_sol, init_sol) {
+         true => Some(compacted_sol),
+         false => None,
+     }
+--- swarm-core\src\optimizer\explore.rs
++++ swarm-core\src\optimizer\explore.rs
+@@ -32,12 +32,18 @@
+     let mut current_width = sep.prob.strip_width();
+     let mut best_width = current_width;
+ 
+-    let mut feasible_sols = vec![sep.prob.save()];
++    let initial_solution = sep.prob.save();
++    let initial_certified = sep.solution_is_certified(&initial_solution, &initial_solution);
++    let mut feasible_sols = if initial_certified {
++        vec![initial_solution.clone()]
++    } else {
++        vec![]
++    };
+ 
+     // 진입 레이아웃을 **검사 없이** ExplFeas 로 보고하면 안 된다. ExplFeas 는
+     // "겹침 없음" 을 뜻하고, 소비자는 그 라벨을 믿고 배치를 그린다.
+     if let Some(l) = sol_listener.as_deref_mut()
+-        && sep.ct.get_total_loss() == 0.0
++        && initial_certified
+     {
+         l.report(ReportType::ExplFeas, &feasible_sols[0], instance);
+     }
+@@ -67,10 +73,20 @@
+         // Attempt to separate the current layout
+         let local_best = sep.separate(term, sol_listener);
+         let total_loss = local_best.1.get_total_loss();
++        if total_loss == 0.0 && !sep.solution_is_certified(&local_best.0, &initial_solution) {
++            log::warn!(
++                "[EXPL] zero-loss candidate failed exact certification; retaining incumbent"
++            );
++            break;
++        }
++        // Separation returns its best snapshot; subsequent shrinking must use that state.
++        if total_loss == 0.0 {
++            sep.rollback(&local_best.0, Some(&local_best.1));
++        }
+ 
+         if total_loss == 0.0 {
+             // If successfully separated
+-            if current_width < best_width {
++            if current_width < best_width || feasible_sols.is_empty() {
+                 info!(
+                     "[EXPL] feasible solution found! (width: {:.3}, dens: {:.3}%)",
+                     current_width,
+@@ -172,9 +188,15 @@
+     info!(
+         "[EXPL] finished, best feasible solution: width: {:.3} ({:.3}%)",
+         best_width,
+-        feasible_sols.last().unwrap().density(instance) * 100.0
++        feasible_sols
++            .last()
++            .map(|s| s.density(instance))
++            .unwrap_or(0.0)
++            * 100.0
+     );
+ 
++    // Never leave a caller looking at a last, unrepaired perturbation.
++    sep.rollback(feasible_sols.last().unwrap_or(&initial_solution), None);
+     feasible_sols
+ }
+ 
+--- swarm-core\src\optimizer\explore_mods.rs
++++ swarm-core\src\optimizer\explore_mods.rs
+@@ -640,12 +640,18 @@
+     // DensitySlack 모드의 기준점. 런마다 자기 자신의 출발 밀도를 쓴다.
+     let density_start = sep.prob.density();
+ 
+-    let mut feasible_sols = vec![sep.prob.save()];
++    let initial_solution = sep.prob.save();
++    let initial_certified = sep.solution_is_certified(&initial_solution, &initial_solution);
++    let mut feasible_sols = if initial_certified {
++        vec![initial_solution.clone()]
++    } else {
++        vec![]
++    };
+ 
+     // 진입 레이아웃을 **검사 없이** ExplFeas 로 보고하면 안 된다. ExplFeas 는
+     // "겹침 없음" 을 뜻하고, 소비자는 그 라벨을 믿고 배치를 그린다.
+     if let Some(l) = sol_listener.as_deref_mut()
+-        && sep.ct.get_total_loss() == 0.0
++        && initial_certified
+     {
+         l.report(ReportType::ExplFeas, &feasible_sols[0], instance);
+     }
+@@ -660,9 +666,18 @@
+     let mut n_conseq_fails: usize = 0;
+ 
+     // ALNS 상태: 연산자 가중치, 직전에 적용한 (연산자, 출발 해 loss), R&R 밴드 tabu
+-    let rnr_enabled = config.rnr.period > 0 && !sep.has_place_groups();
++    let rnr_enabled = config.rnr.period > 0
++        && sep
++            .prob
++            .layout
++            .placed_items
++            .values()
++            .filter(|pi| sep.can_move_individually(pi.item_id))
++            .take(2)
++            .count()
++            >= 2;
+     if config.rnr.period > 0 && !rnr_enabled {
+-        info!("[ALNS] R&R operators disabled because PlaceGroup constraints are active");
++        info!("[ALNS] R&R skipped: fewer than two ungrouped, unfrozen placements");
+     }
+     let rnr_period = rnr_enabled.then_some(config.rnr.period);
+     let mut ops = AdaptiveOps::new(rnr_period, config.alns_decay, config.alns_min_weight);
+@@ -679,6 +694,16 @@
+         // Attempt to separate the current layout
+         let local_best = sep.separate(term, sol_listener);
+         let total_loss = local_best.1.get_total_loss();
++        if total_loss == 0.0 && !sep.solution_is_certified(&local_best.0, &initial_solution) {
++            log::warn!(
++                "[EXPL] zero-loss candidate failed exact certification; retaining incumbent"
++            );
++            break;
++        }
++        // Separation returns its best snapshot; subsequent shrinking must use that state.
++        if total_loss == 0.0 {
++            sep.rollback(&local_best.0, Some(&local_best.1));
++        }
+ 
+         // ALNS: 직전 disruption 연산자의 성과를 채점한다
+         if let Some((op, ref_loss)) = pending_op.take() {
+@@ -696,7 +721,7 @@
+ 
+         if total_loss == 0.0 {
+             // If successfully separated
+-            if current_width < best_width {
++            if current_width < best_width || feasible_sols.is_empty() {
+                 info!(
+                     "[EXPL] feasible solution found! (width: {:.3}, dens: {:.3}%)",
+                     current_width,
+@@ -1000,9 +1025,15 @@
+     info!(
+         "[EXPL] finished, best feasible solution: width: {:.3} ({:.3}%)",
+         best_width,
+-        feasible_sols.last().unwrap().density(instance) * 100.0
++        feasible_sols
++            .last()
++            .map(|s| s.density(instance))
++            .unwrap_or(0.0)
++            * 100.0
+     );
+ 
++    // Never leave a caller looking at a last, unrepaired perturbation.
++    sep.rollback(feasible_sols.last().unwrap_or(&initial_solution), None);
+     feasible_sols
+ }
+ 
+--- swarm-core\src\optimizer\lns.rs
++++ swarm-core\src\optimizer\lns.rs
+@@ -9,9 +9,9 @@
+ //!    호출되어 국소 최적 탈출력을 높인다. 재삽입은 기존 샘플링 + CDE 검증
+ //!    ([`LBFEvaluator`])을 그대로 재사용한다.
+ //!    [`SwarmConfig::nfp_integration`]의 `nfp_reinsertion`이 켜진 호출자만
+-//!    [`NfpReinsertionCache`]를 만들어 [`ruin_and_recreate_with_nfp`]에 넘기면,
++//!    Separator에 기존 설정을 연결하면 phase-local [`NfpReinsertionCache`]를 지연 생성하여,
+ //!    재삽입 위치 탐색이 난수 샘플링에서 **정확한 NFP 후보 열거**로 바뀐다.
+-//!    캐시를 넘기지 않으면(`None`) 기존 경로가 한 비트도 바뀌지 않는다.
++//!    비활성 상태에서는 기존 확률 샘플링 경로를 사용한다.
+ //!
+ //!    [`SwarmConfig::nfp_integration`]: crate::config::SwarmConfig::nfp_integration
+ //! 2. [`swap_pass`] — 면적이 비슷한 두 아이템의 위치를 맞바꾸는 교환 연산.
+@@ -72,10 +72,6 @@
+ /// Floating-point summation noise tolerated by the swap safety guard.
+ const SWAP_UNWEIGHTED_LOSS_EPSILON: f32 = 1.0e-5;
+ 
+-fn is_frozen(sep: &Separator, item_id: usize) -> bool {
+-    sep.frozen_mask.get(item_id).copied().unwrap_or(false)
+-}
+-
+ /// 파괴할 세로 밴드를 고르는 전략. ALNS(explore_mods)가 성공률에 따라 선택한다.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum RuinStrategy {
+@@ -149,8 +145,7 @@
+ /// 호출 후 collision tracker를 재구축하는 disruption 용도다. `term`이 중단을 요청하면
+ /// 진행 중인 search/CD 평가를 cooperative하게 끝내고 전체 연산을 호출 전 상태로 되돌린다.
+ ///
+-/// 이 함수는 [`ruin_and_recreate_with_nfp`]에 `None`을 넘기는 얇은 래퍼다. 공개
+-/// 시그니처를 유지하기 위한 것이며, 동작은 NFP 도입 이전과 완전히 같다.
++/// Uses the phase cache when NFP reinsertion is enabled, otherwise stochastic LBF.
+ pub fn ruin_and_recreate(
+     sep: &mut Separator,
+     cfg: &RuinRecreateConfig,
+@@ -158,7 +153,28 @@
+     tabu: &mut BandTabu,
+     term: &impl Terminator,
+ ) -> usize {
+-    ruin_and_recreate_with_nfp(sep, cfg, strategy, tabu, term, None)
++    if term.kill() {
++        return 0;
++    }
++    if let Some(config) = sep.reinsertion_pending.take() {
++        sep.reinsertion_nfp = NfpReinsertionCache::from_integration_config(&sep.instance, &config);
++        info!(
++            "[LNS] NFP reinsertion cache available: {}",
++            sep.reinsertion_nfp.is_some()
++        );
++    }
++    let started = jagua_rs::Instant::now();
++    let loss_before = sep.ct.get_total_loss();
++    let mut cache = sep.reinsertion_nfp.take();
++    let result = ruin_and_recreate_with_nfp(sep, cfg, strategy, tabu, term, cache.as_mut());
++    sep.reinsertion_nfp = cache;
++    info!(
++        "[LNS] proposal: strategy={strategy:?}, reinserted={result}, loss={loss_before:.4}->{:.4}, elapsed_ms={}, requires_separation={}",
++        sep.ct.get_total_loss(),
++        started.elapsed().as_millis(),
++        sep.ct.get_total_loss() > 0.0
++    );
++    result
+ }
+ 
+ /// [`ruin_and_recreate`]와 같되, **재삽입 위치 탐색**만 정확한 NFP로 바꿀 수 있는 변형.
+@@ -186,13 +202,7 @@
+     if term.kill() {
+         return 0;
+     }
+-    // This operator removes and reinserts individual polygons. Until its regret
+-    // evaluator understands a multi-member envelope, running it on a rigid
+-    // group would either split the group or validate only one member.
+-    if sep.has_place_groups() {
+-        debug!("[LNS] skipping ruin&recreate while rigid place groups are active");
+-        return 0;
+-    }
++    // Group members remain fixed obstacles for individual reinsertion.
+     let n_placed = sep.prob.layout.placed_items.len();
+     if n_placed < 4 {
+         return 0;
+@@ -254,7 +264,7 @@
+             return 0;
+         }
+         let placed = &sep.prob.layout.placed_items[pk];
+-        if !is_frozen(sep, placed.item_id)
++        if sep.can_move_individually(placed.item_id)
+             && placed.shape.bbox.x_max > band_x0
+             && placed.shape.bbox.x_min < band_x1
+         {
+@@ -1126,10 +1136,6 @@
+     if term.kill() {
+         return;
+     }
+-    if sep.has_place_groups() {
+-        debug!("[LNS-PROFILE] skipping ruin&recreate while rigid place groups are active");
+-        return;
+-    }
+     if !profile_cfg.weights.is_valid()
+         || !profile_cfg.row_height.is_finite()
+         || profile_cfg.row_height <= 0.0
+@@ -1166,7 +1172,9 @@
+             .min_by_key(|&x0| OrderedFloat(band_occupied_area(sep, x0, x0 + band_w)))
+             .unwrap_or(0.0),
+         RuinStrategy::Fragmented => {
+-            let scores = fragmentation_scores(sep, band_w, &candidates);
++            let Some(scores) = fragmentation_scores(sep, band_w, &candidates, term) else {
++                return;
++            };
+             candidates
+                 .iter()
+                 .copied()
+@@ -1203,7 +1211,7 @@
+         .layout
+         .placed_items
+         .iter()
+-        .filter(|(_, placed)| !is_frozen(sep, placed.item_id))
++        .filter(|(_, placed)| sep.can_move_individually(placed.item_id))
+         .filter(|(_, placed)| {
+             placed.shape.bbox.x_max > band_x0 && placed.shape.bbox.x_min < band_x1
+         })
+@@ -1237,7 +1245,7 @@
+     // 강체 슬라이드(rigid slide)해 메운다. 조밀한 좌측 prefix는 그대로 둔다.
+     // 슬라이드는 exact CDE로 검증하며, 중단되면 transaction 전체를 롤백한다.
+     if strategy == RuinStrategy::DensitySeam {
+-        let slid = rigid_slide_suffix(sep, band_x0, band_w);
++        let slid = rigid_slide_suffix(sep, band_x0, band_w, term);
+         info!(
+             "[LNS-PROFILE] density-seam rigid slide {:.1}mm at seam {:.1} (band {:.1})",
+             slid, band_x0, band_w
+@@ -1409,7 +1417,12 @@
+ /// DensitySeam 전용: seam 우측의 suffix를 좌측으로 강체 슬라이드해 제거된 victim이
+ /// 남긴 빈 공간을 메운다. 모든 이동은 exact CDE로 검증하며, 최대 안전 거리(`max_delta`)
+ /// 를 기하급수적으로 줄여가며 찾는다. 적용된 실제 슬라이드 거리(mm)를 반환한다 (0이면 없음).
+-fn rigid_slide_suffix(sep: &mut Separator, seam_x0: f32, max_delta: f32) -> f32 {
++fn rigid_slide_suffix(
++    sep: &mut Separator,
++    seam_x0: f32,
++    max_delta: f32,
++    term: &impl Terminator,
++) -> f32 {
+     // Keep placement keys rather than item ids: demand > 1 gives several
+     // independently placed copies the same item id.  Each retry restores the
+     // same snapshot, so these keys remain valid at the start of every trial.
+@@ -1418,7 +1431,7 @@
+         .layout
+         .placed_items
+         .iter()
+-        .filter(|(_, pi)| !is_frozen(sep, pi.item_id))
++        .filter(|(_, pi)| sep.can_move_individually(pi.item_id))
+         .filter(|(_, pi)| pi.shape.bbox.x_min >= seam_x0 - 1e-3)
+         .map(|(pk, _)| pk)
+         .collect();
+@@ -1446,11 +1459,17 @@
+     }
+ 
+     let before = sep.prob.save();
++    let frozen_ids: Vec<_> = sep
++        .frozen_mask
++        .iter()
++        .enumerate()
++        .filter_map(|(id, &f)| f.then_some(id))
++        .collect();
+     let mut applied = 0.0f32;
+     // 최대 안전 거리를 기하급수 감소로 탐색한다. move_item이 tracker를 갱신하므로
+     // 각 시도는 깨끗한(복원된) 상태에서 시작해야 한다.
+     for _ in 0..8 {
+-        if delta <= 1e-3 {
++        if term.kill() || delta <= 1e-3 {
+             break;
+         }
+         sep.prob.restore(&before);
+@@ -1460,7 +1479,17 @@
+             let shifted = dt.compose().translate((-delta, 0.0)).decompose();
+             sep.move_item(pk, shifted);
+         }
+-        if sep.ct.get_total_loss() <= 1e-3 {
++        if term.kill() {
++            break;
++        }
++        if sep.ct.get_total_loss() <= 1e-3
++            && crate::structure::pipeline::partial_solution_validation_error_with_frozen_ids(
++                &sep.instance,
++                &sep.prob.save(),
++                &frozen_ids,
++            )
++            .is_none()
++        {
+             applied = delta;
+             break;
+         }
+@@ -1575,7 +1604,7 @@
+             if term.kill() {
+                 return None;
+             }
+-            let scores = fragmentation_scores(sep, band_w, candidates);
++            let scores = fragmentation_scores(sep, band_w, candidates, term)?;
+             if term.kill() {
+                 return None;
+             }
+@@ -1799,7 +1828,12 @@
+ /// 각 후보 밴드의 파편화 점수: 닫힌 포켓들이 밴드에 걸친 정도(포켓당 0~1)의 합.
+ /// 큰 빈 밴드가 아니라 **작은 포켓이 여럿 걸친 밴드**가 높은 점수를 받는다.
+ /// polish의 occupancy grid를 거친 해상도로 1회 구축해 계산한다.
+-fn fragmentation_scores(sep: &Separator, band_w: f32, candidates: &[f32]) -> Vec<f32> {
++fn fragmentation_scores(
++    sep: &Separator,
++    band_w: f32,
++    candidates: &[f32],
++    term: &impl Terminator,
++) -> Option<Vec<f32>> {
+     let layout = &sep.prob.layout;
+     let container = layout.container.outer_cd.bbox;
+ 
+@@ -1813,23 +1847,25 @@
+     let min_cell = (container.width() * container.height() / FRAG_GRID_MAX_CELLS as f32).sqrt();
+     let cell = (min_item_dim * 0.5).max(min_cell).max(f32::EPSILON);
+ 
+-    let grid = OccupancyGrid::build(layout, cell);
+-    let pockets = grid.pockets();
+-
+-    candidates
+-        .iter()
+-        .map(|&x0| {
+-            let x1 = x0 + band_w;
+-            pockets
+-                .iter()
+-                .map(|p| {
+-                    let ow = (p.bbox.x_max.min(x1) - p.bbox.x_min.max(x0)).max(0.0);
+-                    let pw = (p.bbox.x_max - p.bbox.x_min).max(f32::EPSILON);
+-                    ow / pw
+-                })
+-                .sum::<f32>()
+-        })
+-        .collect()
++    let grid = OccupancyGrid::build(layout, cell, FRAG_GRID_MAX_CELLS, term)?;
++    let pockets = grid.pockets(term)?;
++
++    Some(
++        candidates
++            .iter()
++            .map(|&x0| {
++                let x1 = x0 + band_w;
++                pockets
++                    .iter()
++                    .map(|p| {
++                        let ow = (p.bbox.x_max.min(x1) - p.bbox.x_min.max(x0)).max(0.0);
++                        let pw = (p.bbox.x_max - p.bbox.x_min).max(f32::EPSILON);
++                        ow / pw
++                    })
++                    .sum::<f32>()
++            })
++            .collect(),
++    )
+ }
+ 
+ /// 스왑(교환) 이웃 연산 패스.
+@@ -1843,14 +1879,7 @@
+ /// 반영된 스왑 수를 반환한다. 각 attempt 시작 전에 cooperative
+ /// termination을 확인하므로 중단 요청 후 새 swap을 시작하지 않는다.
+ pub fn swap_pass(sep: &mut Separator, n_attempts: usize, term: &impl Terminator) -> usize {
+-    // The legacy swap computes local loss for exactly two polygons and keeps
+-    // their PItemKeys across both moves. A rigid move replaces several keys, so
+-    // use the group-aware exploration disruption instead and disable this
+-    // separator hook for grouped runs.
+-    if sep.has_place_groups() {
+-        debug!("[SWAP] skipping single-item swap while rigid place groups are active");
+-        return 0;
+-    }
++    // Swap only ungrouped items; moving a rigid unit replaces several keys.
+     if sep.prob.layout.placed_items.len() < 2 {
+         return 0;
+     }
+@@ -1869,6 +1898,7 @@
+             .iter()
+             .filter(|(pk, pi)| {
+                 !sep.frozen_mask.get(pi.item_id).copied().unwrap_or(false)
++                    && sep.place_groups.group_id_of(pi.item_id).is_none()
+                     && sep.ct.get_loss(*pk) > 0.0
+             })
+             .map(|(pk, pi)| (pk, pi.item_id, pi.shape.area, pi.d_transf))
+@@ -1887,6 +1917,7 @@
+                 *pk != pk1
+                     && pi.item_id != id1
+                     && !sep.frozen_mask.get(pi.item_id).copied().unwrap_or(false)
++                    && sep.place_groups.group_id_of(pi.item_id).is_none()
+                     && {
+                         let ratio = pi.shape.area / area1;
+                         ratio >= ratio_min && ratio <= ratio_max
+@@ -2081,6 +2112,107 @@
+         fn timeout_at(&self) -> Option<jagua_rs::Instant> {
+             None
+         }
++    }
++
++    #[test]
++    fn configured_rnr_wrapper_uses_and_reuses_the_nfp_cache() {
++        let (_, mut sep) = fu_separator(11);
++        let mut config = crate::config::DEFAULT_NFP_INTEGRATION_CONFIG;
++        config.nfp_reinsertion = true;
++        sep.configure_reinsertion(&config);
++        assert!(
++            sep.reinsertion_nfp.is_none(),
++            "cache should stay lazy until an RNR call"
++        );
++        let mut tabu = BandTabu::new();
++        let cfg = recreate_config();
++        let count = ruin_and_recreate(
++            &mut sep,
++            &cfg,
++            RuinStrategy::LowDensity,
++            &mut tabu,
++            &BasicTerminator::new(),
++        );
++        assert!(count >= 2);
++        assert!(sep.reinsertion_pending.is_none());
++        assert!(sep.reinsertion_nfp.as_ref().unwrap().stats().entries > 0);
++        let queries = sep.reinsertion_nfp.as_ref().unwrap().stats().entries;
++        ruin_and_recreate(
++            &mut sep,
++            &cfg,
++            RuinStrategy::Rightmost,
++            &mut tabu,
++            &BasicTerminator::new(),
++        );
++        assert!(sep.reinsertion_nfp.as_ref().unwrap().stats().entries >= queries);
++        assert!(crate::util::assertions::tracker_matches_layout(
++            &sep.ct,
++            &sep.prob.layout
++        ));
++    }
++
++    #[test]
++    fn perturbation_swap_collisions_are_repaired_before_certification() {
++        let (_, mut sep) = fu_separator(42);
++        let reference = sep.prob.save();
++        assert!(sep.solution_is_certified(&reference, &reference));
++        assert!(crate::optimizer::explore::disrupt_solution(
++            &mut sep,
++            &crate::config::DEFAULT_SWARM_CONFIG.expl_cfg
++        ));
++        let proposed_loss = sep.ct.get_total_loss();
++        assert!(
++            proposed_loss > 0.0,
++            "fixture must exercise temporary collisions"
++        );
++        assert!(!sep.solution_is_certified(&sep.prob.save(), &reference));
++        let mut term = BasicTerminator::new();
++        term.new_timeout(Duration::from_secs(10));
++        let (repaired, ct) = sep.separate(&term, &mut None);
++        println!(
++            "Perturbation swap repair: {proposed_loss} -> {}",
++            ct.get_total_loss()
++        );
++        assert_eq!(ct.get_total_loss(), 0.0);
++        assert!(sep.solution_is_certified(&repaired, &reference));
++    }
++
++    #[test]
++    fn worsening_rnr_proposal_requires_repair_and_exact_validation() {
++        let (_, mut sep) = fu_separator(42);
++        let reference = sep.prob.save();
++        sep.change_strip_width(sep.prob.strip_width() * 0.85, None);
++        let before = sep.ct.get_total_loss();
++        let count = ruin_and_recreate(
++            &mut sep,
++            &crate::config::DEFAULT_SWARM_CONFIG.expl_cfg.rnr,
++            RuinStrategy::Random,
++            &mut BandTabu::new(),
++            &BasicTerminator::new(),
++        );
++        let proposed = sep.ct.get_total_loss();
++        assert!(count > 0 && proposed > before);
++        assert!(!sep.solution_is_certified(&sep.prob.save(), &reference));
++        let mut term = BasicTerminator::new();
++        term.new_timeout(Duration::from_secs(10));
++        let (repaired, ct) = sep.separate(&term, &mut None);
++        assert!(
++            ct.get_total_loss() < proposed,
++            "subsequent separation must reduce the introduced collisions"
++        );
++        let certified =
++            ct.get_total_loss() == 0.0 && sep.solution_is_certified(&repaired, &reference);
++        // At an infeasible target width, retain the previously certified incumbent.
++        let committed = if certified {
++            repaired
++        } else {
++            reference.clone()
++        };
++        assert!(sep.solution_is_certified(&committed, &reference));
++        println!(
++            "RNR random: {before} -> {proposed} -> {}, certified_repair={certified}",
++            ct.get_total_loss()
++        );
+     }
+ 
+     #[test]
+@@ -2412,7 +2544,7 @@
+             Xoshiro256PlusPlus::seed_from_u64(91),
+             config.expl_cfg.separator_config,
+         );
+-        let applied = rigid_slide_suffix(&mut separator, 15.0, 5.0);
++        let applied = rigid_slide_suffix(&mut separator, 15.0, 5.0, &BasicTerminator::new());
+ 
+         let mut repeated_x = separator
+             .prob
+--- swarm-core\src\optimizer\mod.rs
++++ swarm-core\src\optimizer\mod.rs
+@@ -281,6 +281,7 @@
+         next_rng(),
+         expl_config.separator_config,
+     );
++    expl_separator.configure_reinsertion(nfp_integration);
+ 
+     // 탐색 단계 선택.
+     //
+@@ -352,7 +353,10 @@
+             }
+         }
+     };
+-    let expl_candidate = solutions.last().unwrap().clone();
++    let expl_candidate = solutions
++        .last()
++        .cloned()
++        .unwrap_or_else(|| exact_incumbent.clone());
+     let final_explore_sol =
+         retain_exact_no_worse(&instance, &exact_incumbent, expl_candidate, "EXPL");
+     exact_incumbent = final_explore_sol.clone();
+@@ -366,6 +370,7 @@
+         next_rng(),
+         cmpr_config.separator_config,
+     );
++    cmpr_separator.configure_reinsertion(nfp_integration);
+     let cmpr_candidate = compression_phase(
+         &instance,
+         &mut cmpr_separator,
+--- swarm-core\src\optimizer\reclaim.rs
++++ swarm-core\src\optimizer\reclaim.rs
+@@ -162,6 +162,7 @@
+     if !cfg.enabled {
+         return (certified, stats);
+     }
++    sep.configure_reinsertion(nfp_cfg);
+     // 무개선을 몇 번까지 참을지. 모드의 성격이 정한다.
+     let stagnation_limit = match cfg.mode {
+         // Conservative retry policy for compression reentry; its split selection
+@@ -244,7 +245,8 @@
+                 );
+                 // R&R 은 겹침을 남길 수 있다. 분리로 푼다.
+                 let (separated, snapshot) = sep.separate(&term, &mut None);
+-                if snapshot.get_total_loss() != 0.0 {
++                if snapshot.get_total_loss() != 0.0 || !sep.solution_is_certified(&separated, &best)
++                {
+                     // 못 풀었다 — 이 사이클은 버리고 최선으로 돌아간다.
+                     sep.rollback(&best, None);
+                     best.clone()
+--- swarm-core\src\optimizer\separator.rs
++++ swarm-core\src\optimizer\separator.rs
+@@ -150,6 +150,9 @@
+     pub frozen_mask: Vec<bool>,
+     /// Rigid placement units. Empty keeps the legacy single-item behavior.
+     pub place_groups: PlaceGroups,
++    /// Phase-local reinsertion cache, independent of the separator sampler.
++    pub(crate) reinsertion_pending: Option<crate::config::NfpIntegrationConfig>,
++    pub(crate) reinsertion_nfp: Option<crate::optimizer::lns::NfpReinsertionCache>,
+ }
+ 
+ /// ① NFP 샘플러용 캐시를 만든다. 준비할 수 있는 형상이 하나도 없으면 `None`.
+@@ -224,7 +227,42 @@
+             thread_pool: pool,
+             frozen_mask: vec![false; n_items],
+             place_groups: PlaceGroups::default(),
+-        }
++            reinsertion_nfp: None,
++            reinsertion_pending: None,
++        }
++    }
++
++    /// Individual operators leave rigid members in place as collision obstacles.
++    pub fn can_move_individually(&self, item_id: usize) -> bool {
++        !self.frozen_mask.get(item_id).copied().unwrap_or(false)
++            && self.place_groups.group_id_of(item_id).is_none()
++    }
++
++    /// Wire the existing integration flag once per phase, reusing pair geometry.
++    pub fn configure_reinsertion(&mut self, config: &crate::config::NfpIntegrationConfig) {
++        if !config.nfp_reinsertion {
++            self.reinsertion_nfp = None;
++            self.reinsertion_pending = None;
++        } else if self.reinsertion_nfp.is_none() {
++            self.reinsertion_pending = Some(*config);
++        }
++    }
++
++    /// A zero surrogate loss is only a proposal: certify geometry and constraints.
++    pub fn solution_is_certified(&self, candidate: &SPSolution, reference: &SPSolution) -> bool {
++        self.place_groups
++            .solution_preserves_relative_poses(candidate)
++            && crate::util::assertions::frozen_poses_preserved(
++                reference,
++                candidate,
++                &self.frozen_mask,
++            )
++            && crate::structure::pipeline::solution_validation_error_with_frozen(
++                &self.instance,
++                candidate,
++                &self.frozen_mask,
++            )
++            .is_none()
+     }
+ 
+     /// Installs validated rigid placement units for this phase and every
+--- swarm-core\src\optimizer\polish\holes.rs
++++ swarm-core\src\optimizer\polish\holes.rs
+@@ -52,23 +52,69 @@
+ impl OccupancyGrid {
+     /// 레이아웃을 `cell` 크기의 격자로 래스터화한다.
+     /// 셀 중심이 어떤 아이템 내부에 있으면 점유된 것으로 본다.
+-    pub(crate) fn build(layout: &Layout, cell: f32) -> Self {
++    pub(crate) fn build(
++        layout: &Layout,
++        cell: f32,
++        max_cells: usize,
++        term: &impl Terminator,
++    ) -> Option<Self> {
++        if term.kill() {
++            return None;
++        }
+         let bbox = layout.container.outer_cd.bbox;
+-        let nx = ((bbox.width() / cell).ceil() as usize).max(1);
+-        let ny = ((bbox.height() / cell).ceil() as usize).max(1);
+-
++        let (cell, nx, ny) =
++            Self::bounded_dimensions(bbox.width(), bbox.height(), cell, max_cells)?;
++        let count = nx.checked_mul(ny)?;
++        let mut occupied = Vec::new();
++        occupied.try_reserve_exact(count).ok()?;
++        occupied.resize(count, false);
+         let mut grid = Self {
+             origin: Point(bbox.x_min, bbox.y_min),
+             cell,
+             nx,
+             ny,
+-            occupied: vec![false; nx * ny],
++            occupied,
+         };
+-
+         for (_, pi) in layout.placed_items.iter() {
+-            grid.mark_shape(&pi.shape);
+-        }
+-        grid
++            if !grid.mark_shape(&pi.shape, term) {
++                return None;
++            }
++        }
++        Some(grid)
++    }
++
++    /// Bound actual rounded dimensions, including strips with extreme aspect ratios.
++    fn bounded_dimensions(
++        width: f32,
++        height: f32,
++        requested: f32,
++        budget: usize,
++    ) -> Option<(f32, usize, usize)> {
++        if !width.is_finite()
++            || !height.is_finite()
++            || width <= 0.0
++            || height <= 0.0
++            || !requested.is_finite()
++            || requested <= 0.0
++        {
++            return None;
++        }
++        let budget = budget.max(1);
++        let (w, h, limit) = (width as f64, height as f64, budget as f64);
++        let mut cell = (requested as f64)
++            .max((w * h / limit).sqrt())
++            .max(w / limit)
++            .max(h / limit) as f32;
++        loop {
++            let nx = (w / cell as f64).ceil().max(1.0) as usize;
++            let ny = (h / cell as f64).ceil().max(1.0) as usize;
++            if nx.checked_mul(ny).is_some_and(|n| n <= budget) {
++                return Some((cell, nx, ny));
++            }
++            // Ceil can add a whole row on a very thin strip; never allocate before rechecking.
++            let scale = ((nx as f64 * ny as f64) / limit).sqrt().max(1.001);
++            cell = ((cell as f64 * scale).min(w.max(h))) as f32;
++        }
+     }
+ 
+     fn cell_area(&self) -> f32 {
+@@ -83,7 +129,10 @@
+     }
+ 
+     /// 도형이 덮는 셀들을 점유로 표시한다.
+-    fn mark_shape(&mut self, shape: &SPolygon) {
++    fn mark_shape(&mut self, shape: &SPolygon, term: &impl Terminator) -> bool {
++        if term.kill() {
++            return false;
++        }
+         let bbox = shape.bbox;
+         let (ix0, ix1) = self.index_range(bbox.x_min, bbox.x_max, self.origin.0, self.nx);
+         let (iy0, iy1) = self.index_range(bbox.y_min, bbox.y_max, self.origin.1, self.ny);
+@@ -92,6 +141,9 @@
+         for iy in iy0..iy1 {
+             for ix in ix0..ix1 {
+                 let idx = iy * self.nx + ix;
++                if ((iy - iy0) * (ix1 - ix0) + ix - ix0) % 256 == 0 && term.kill() {
++                    return false;
++                }
+                 if self.occupied[idx] {
+                     continue;
+                 }
+@@ -106,6 +158,7 @@
+                 }
+             }
+         }
++        true
+     }
+ 
+     fn index_range(&self, lo: f32, hi: f32, origin: f32, n: usize) -> (usize, usize) {
+@@ -115,14 +168,17 @@
+     }
+ 
+     /// I-08: 이동으로 비워진 영역의 셀을 현재 레이아웃 기준으로 재래스터화한다.
+-    /// `absorb`는 새 위치만 점유로 더하므로, 옛 자리를 해방해야 같은 패스 안에서
++    /// 새 위치를 표시한 뒤 옛 자리를 해방해야 같은 패스 안에서
+     /// 후속 후보가 비워진 공간을 쓸 수 있다. 영역 셀을 전부 비운 뒤 그 영역과
+     /// bbox가 겹치는 아이템만 다시 표시한다 (표시는 보수적으로 전체 도형 기준).
+-    pub(crate) fn release_region(&mut self, bbox: Rect, layout: &Layout) {
++    fn release_region(&mut self, bbox: Rect, layout: &Layout, term: &impl Terminator) -> bool {
+         let (ix0, ix1) = self.index_range(bbox.x_min, bbox.x_max, self.origin.0, self.nx);
+         let (iy0, iy1) = self.index_range(bbox.y_min, bbox.y_max, self.origin.1, self.ny);
+         for iy in iy0..iy1 {
+             for ix in ix0..ix1 {
++                if ((iy - iy0) * (ix1 - ix0) + ix - ix0) % 256 == 0 && term.kill() {
++                    return false;
++                }
+                 self.occupied[iy * self.nx + ix] = false;
+             }
+         }
+@@ -133,30 +189,43 @@
+                 && b.y_min <= bbox.y_max
+                 && bbox.y_min <= b.y_max
+             {
+-                self.mark_shape(&pi.shape);
+-            }
+-        }
++                if !self.mark_shape(&pi.shape, term) {
++                    return false;
++                }
++            }
++        }
++        true
+     }
+ 
+     /// 비어 있는 셀들을 연결 성분(4-연결)으로 묶어 포켓 목록을 만든다.
+     ///
+     /// strip 오른쪽 경계에 닿는 성분은 packing frontier 바깥의 열린 공간이므로 제외한다.
+     /// 즉 여기서 나오는 포켓은 "아이템들에 둘러싸인 진짜 빈 주머니"다.
+-    pub(crate) fn pockets(&self) -> Vec<Pocket> {
+-        self.empty_regions(false)
++    pub(crate) fn pockets(&self, term: &impl Terminator) -> Option<Vec<Pocket>> {
++        self.empty_regions(false, term)
+     }
+ 
+     /// 닫힌 포켓과 packing frontier에 연결된 우측 개방 만을 모두 반환한다.
+-    fn pockets_and_bays(&self) -> Vec<Pocket> {
+-        self.empty_regions(true)
+-    }
+-
+-    fn empty_regions(&self, include_right_open: bool) -> Vec<Pocket> {
++    fn pockets_and_bays(&self, term: &impl Terminator) -> Option<Vec<Pocket>> {
++        self.empty_regions(true, term)
++    }
++
++    fn empty_regions(
++        &self,
++        include_right_open: bool,
++        term: &impl Terminator,
++    ) -> Option<Vec<Pocket>> {
++        if term.kill() {
++            return None;
++        }
+         let mut label = vec![false; self.occupied.len()];
+         let mut pockets = vec![];
+         let mut stack: Vec<usize> = vec![];
+ 
+         for start in 0..self.occupied.len() {
++            if start % 256 == 0 && term.kill() {
++                return None;
++            }
+             if self.occupied[start] || label[start] {
+                 continue;
+             }
+@@ -168,6 +237,9 @@
+             let mut touches_right = false;
+ 
+             while let Some(idx) = stack.pop() {
++                if cells.len() % 256 == 0 && term.kill() {
++                    return None;
++                }
+                 cells.push(idx);
+                 let (ix, iy) = (idx % self.nx, idx / self.nx);
+                 if ix + 1 == self.nx {
+@@ -200,7 +272,7 @@
+                 pockets.push(pocket);
+             }
+         }
+-        pockets
++        Some(pockets)
+     }
+ 
+     fn make_pocket(&self, cells: Vec<usize>, right_open: bool) -> Option<Pocket> {
+@@ -257,6 +329,10 @@
+         // DFS 순서에서 균등 추출하면 깊은 bay의 왼쪽 끝을 우연히 모두 버릴 수 있다.
+         // 목적함수와 같은 순서(x, y)로 먼저 정렬한 뒤 가장 왼쪽 후보를 보존한다.
+         let mut ordered = free;
++        if ordered.len() > max_n {
++            ordered.select_nth_unstable_by_key(max_n, |idx| (idx % self.nx, idx / self.nx));
++            ordered.truncate(max_n);
++        }
+         ordered.sort_unstable_by_key(|idx| (idx % self.nx, idx / self.nx));
+         ordered
+             .iter()
+@@ -270,28 +346,6 @@
+             })
+             .collect()
+     }
+-
+-    /// 도형을 새로 점유 표시한 뒤, 영향을 받은 포켓들의 여유 면적/bbox를 갱신한다.
+-    fn absorb(&mut self, shape: &SPolygon, pockets: &mut Vec<Pocket>) {
+-        self.mark_shape(shape);
+-        pockets.retain_mut(|p| {
+-            if Rect::intersection(p.bbox, shape.bbox).is_none() {
+-                return true;
+-            }
+-            let free = p.cells.iter().filter(|&&i| !self.occupied[i]).count();
+-            if free == 0 {
+-                return false;
+-            }
+-            p.free_area = free as f32 * self.cell * self.cell;
+-            match self.cells_bbox(&p.cells) {
+-                Some(b) => {
+-                    p.bbox = b;
+-                    true
+-                }
+-                None => false,
+-            }
+-        });
+-    }
+ }
+ 
+ /// 포켓 안에서의 재배치 후보를 평가한다.
+@@ -380,17 +434,18 @@
+ ///
+ /// 반환값: 실제로 재배치된 아이템 수
+ pub fn hole_fill_pass(sep: &mut Separator, cfg: &HoleFillConfig, term: &impl Terminator) -> usize {
+-    if sep.has_place_groups() {
+-        info!("[HOLE] skipping single-polygon pocket search while rigid place groups are active");
+-        return 0;
+-    }
+     if sep.prob.layout.placed_items.is_empty() {
+         return 0;
+     }
+ 
+     let cell = grid_cell_size(sep, cfg);
+-    let mut grid = OccupancyGrid::build(&sep.prob.layout, cell);
+-    let mut pockets = grid.pockets_and_bays();
++    let Some(mut grid) = OccupancyGrid::build(&sep.prob.layout, cell, cfg.max_cells, term) else {
++        return 0;
++    };
++    let Some(mut pockets) = grid.pockets_and_bays(term) else {
++        return 0;
++    };
++    let mut dirty = false;
+     if pockets.is_empty() {
+         info!(
+             "[HOLE] no pockets or right-open bays found (cell: {:.4})",
+@@ -416,7 +471,7 @@
+         .layout
+         .placed_items
+         .iter()
+-        .filter(|(_, pi)| !sep.frozen_mask.get(pi.item_id).copied().unwrap_or(false))
++        .filter(|(_, pi)| sep.can_move_individually(pi.item_id))
+         .filter(|(_, pi)| pi.shape.bbox.x_max >= band_start)
+         .map(|(pk, pi)| (pk, pi.item_id, pi.shape.area, pi.shape.bbox.x_max))
+         .sorted_by_key(|(_, _, area, _)| OrderedFloat(*area))
+@@ -428,6 +483,13 @@
+     for (pk, item_id, area, cur_x_max) in candidates {
+         if term.kill() {
+             break;
++        }
++        if dirty {
++            let Some(refreshed) = grid.pockets_and_bays(term) else {
++                break;
++            };
++            pockets = refreshed;
++            dirty = false;
+         }
+         // 이 아이템보다 왼쪽에 시작점이 있으면서 충분히 큰 포켓/bay만 노린다.
+         // 열린 bay의 bbox.x_max는 strip 우측 끝이므로 기존 x_max 비교로는 항상
+@@ -474,14 +536,14 @@
+         if let Some(dt) = chosen {
+             let old_bbox = sep.prob.layout.placed_items[pk].shape.bbox;
+             let new_pk = sep.move_item(pk, dt);
+-            // 새 위치를 점유로 반영하고 포켓 정보를 갱신한다.
+-            let shape = sep.prob.layout.placed_items[new_pk].shape.clone();
+-            grid.absorb(&shape, &mut pockets);
+-            // I-08: 옛 자리를 해방하고 포켓을 재계산한다 — 같은 패스 안에서
+-            // 후속 후보가 방금 비워진 공간으로 연쇄 이동할 수 있다.
+-            grid.release_region(old_bbox, &sep.prob.layout);
+-            pockets = grid.pockets_and_bays();
+             n_moved += 1;
++            // Update occupancy once. Rebuild topology only if another candidate needs it.
++            if !grid.mark_shape(&sep.prob.layout.placed_items[new_pk].shape, term)
++                || !grid.release_region(old_bbox, &sep.prob.layout, term)
++            {
++                break;
++            }
++            dirty = true;
+         }
+     }
+ 
+@@ -853,10 +915,6 @@
+     cache: &mut NfpHoleCache,
+     term: &impl Terminator,
+ ) -> usize {
+-    if sep.has_place_groups() {
+-        info!("[HOLE/NFP] skipping exact pocket search while rigid place groups are active");
+-        return 0;
+-    }
+     if sep.prob.layout.placed_items.is_empty() {
+         return 0;
+     }
+@@ -869,7 +927,7 @@
+         .layout
+         .placed_items
+         .iter()
+-        .filter(|(_, pi)| !sep.frozen_mask.get(pi.item_id).copied().unwrap_or(false))
++        .filter(|(_, pi)| sep.can_move_individually(pi.item_id))
+         .filter(|(_, pi)| pi.shape.bbox.x_max >= band_start)
+         .map(|(pk, pi)| (pk, pi.item_id, pi.shape.area, pi.shape.bbox.x_max))
+         .sorted_by_key(|(_, _, area, _)| OrderedFloat(*area))
+@@ -1196,6 +1254,46 @@
+ mod tests {
+     use super::{OccupancyGrid, Point};
+ 
++    #[test]
++    fn grid_budget_bounds_rounded_dimensions_for_extreme_aspect_ratios() {
++        for (w, h) in [(1e9, 1.0), (1.0, 1e9), (999.0, 1001.0), (f32::MAX, 1.0)] {
++            for budget in [0, 1, 7, 400_000] {
++                let (cell, nx, ny) = OccupancyGrid::bounded_dimensions(w, h, 0.1, budget).unwrap();
++                assert!(nx.checked_mul(ny).unwrap() <= budget.max(1));
++                assert!(cell.is_finite() && cell > 0.0);
++                assert!(nx as f64 * cell as f64 >= w as f64);
++                assert!(ny as f64 * cell as f64 >= h as f64);
++            }
++        }
++        assert!(OccupancyGrid::bounded_dimensions(f32::INFINITY, 1.0, 0.1, 400_000).is_none());
++    }
++
++    #[test]
++    fn flood_fill_stops_without_publishing_a_partial_inventory() {
++        use crate::util::terminator::Terminator;
++        use std::sync::atomic::{AtomicUsize, Ordering};
++        struct StopAfter(AtomicUsize);
++        impl Terminator for StopAfter {
++            fn kill(&self) -> bool {
++                self.0.fetch_add(1, Ordering::Relaxed) >= 3
++            }
++            fn new_timeout(&mut self, _: std::time::Duration) {}
++            fn timeout_at(&self) -> Option<jagua_rs::Instant> {
++                None
++            }
++        }
++        let grid = OccupancyGrid {
++            origin: Point(0.0, 0.0),
++            cell: 1.0,
++            nx: 1000,
++            ny: 100,
++            occupied: vec![false; 100_000],
++        };
++        let term = StopAfter(AtomicUsize::new(0));
++        assert!(grid.pockets_and_bays(&term).is_none());
++        assert!(term.0.load(Ordering::Relaxed) <= 5);
++    }
++
+     fn grid_with_one_closed_pocket() -> OccupancyGrid {
+         let mut grid = OccupancyGrid {
+             origin: Point(0.0, 0.0),
+@@ -1215,11 +1313,15 @@
+     fn bay_inventory_includes_right_open_component_without_changing_pockets_api() {
+         let grid = grid_with_one_closed_pocket();
+ 
+-        let closed = grid.pockets();
++        let closed = grid
++            .pockets(&crate::util::terminator::BasicTerminator::new())
++            .unwrap();
+         assert_eq!(closed.len(), 1);
+         assert!(!closed[0].right_open);
+ 
+-        let all = grid.pockets_and_bays();
++        let all = grid
++            .pockets_and_bays(&crate::util::terminator::BasicTerminator::new())
++            .unwrap();
+         assert_eq!(all.len(), 2);
+         assert_eq!(all.iter().filter(|region| region.right_open).count(), 1);
+     }
+@@ -1228,7 +1330,8 @@
+     fn bay_anchors_keep_the_leftmost_candidates_when_capped() {
+         let grid = grid_with_one_closed_pocket();
+         let bay = grid
+-            .pockets_and_bays()
++            .pockets_and_bays(&crate::util::terminator::BasicTerminator::new())
++            .unwrap()
+             .into_iter()
+             .find(|region| region.right_open)
+             .unwrap();
+@@ -1462,6 +1565,57 @@
+ 
+     /// 들어갈 곳이 없는 것은 정상이다. 에러도, 이동도 아니다.
+     #[test]
++    fn exact_hole_fill_moves_ungrouped_item_between_rigid_walls() {
++        use crate::optimizer::place_groups::{PlaceGroupMember, PlaceGroupSpec, PlaceGroups};
++        let (instance, problem) = narrow_pocket_fixture();
++        let mut sep = separator(instance.clone(), problem, 202);
++        let members = sep
++            .prob
++            .layout
++            .placed_items
++            .values()
++            .filter(|p| p.item_id < 2)
++            .map(|p| PlaceGroupMember {
++                item_id: p.item_id,
++                initial_transform: p.d_transf,
++            })
++            .collect();
++        sep.set_place_groups(
++            PlaceGroups::new(&instance, vec![PlaceGroupSpec { id: 1, members }]).unwrap(),
++        )
++        .unwrap();
++        let before = sep.prob.save();
++        let mut flags = crate::config::DEFAULT_NFP_INTEGRATION_CONFIG;
++        flags.nfp_hole_filling = true;
++        let count = hole_fill_pass_with_nfp(
++            &mut sep,
++            &narrow_pocket_config(),
++            &flags,
++            None,
++            &BasicTerminator::new(),
++        );
++        assert!(count > 0);
++        assert!(sep.solution_is_certified(&sep.prob.save(), &before));
++        for p in before
++            .layout_snapshot
++            .placed_items
++            .values()
++            .filter(|p| p.item_id < 2)
++        {
++            assert_eq!(
++                p.d_transf,
++                sep.prob
++                    .layout
++                    .placed_items
++                    .values()
++                    .find(|q| q.item_id == p.item_id)
++                    .unwrap()
++                    .d_transf
++            );
++        }
++    }
++
++    #[test]
+     fn enabled_flag_reports_no_move_when_nothing_fits() {
+         let instance = import_instance(serde_json::json!({
+             "name":"nfp-hole-no-room",
+--- swarm-core\src\optimizer\polish\mod.rs
++++ swarm-core\src\optimizer\polish\mod.rs
+@@ -135,7 +135,7 @@
+     // separator가 어떤 상태로 넘어왔든 입력 해로 되돌리고 시작한다.
+     sep.rollback(init_sol, None);
+ 
+-    if sep.ct.get_total_loss() != 0.0 {
++    if sep.ct.get_total_loss() != 0.0 || !sep.solution_is_certified(init_sol, init_sol) {
+         // 입력이 feasible하지 않으면 후처리의 전제가 깨진다.
+         info!("[PLSH] initial solution is not feasible, skipping");
+         return (
+@@ -149,8 +149,8 @@
+     }
+ 
+     let grouped = sep.has_place_groups();
+-    // Rigid units use whole-unit slide probes. Independent-item LP and hole
+-    // reconstruction remain disabled until their models include rigid units.
++    // Rigid units use whole-unit slide probes. LP remains disabled for grouped
++    // layouts; hole filling moves only ungrouped items around the rigid obstacles.
+     let mut best_sol = init_sol.clone();
+     let init_width = init_sol.strip_width();
+ 
+@@ -183,9 +183,11 @@
+         }
+         if config.slide.enabled && !term.kill() {
+             changes += slide::slide_pass(sep, &config.slide, term);
+-            sep.refit_strip();
+-        }
+-        if config.hole_fill.enabled && !grouped && !term.kill() {
++            if !term.kill() {
++                sep.refit_strip();
++            }
++        }
++        if config.hole_fill.enabled && !term.kill() {
+             changes += holes::hole_fill_pass_with_nfp(
+                 sep,
+                 &config.hole_fill,
+@@ -193,7 +195,14 @@
+                 nfp_hole_cache.as_mut(),
+                 term,
+             );
+-            sep.refit_strip();
++            if !term.kill() {
++                sep.refit_strip();
++            }
++        }
++        // On cancellation retain the already certified incumbent. Do not start
++        // another geometry scan or refit for a partially completed round.
++        if term.kill() {
++            break;
+         }
+         // 어떤 패스도 실행 가능성을 깨뜨리면 안 된다. 만약 깨졌다면 마지막 정상 해로 되돌린다.
+         if sep.ct.get_total_loss() != 0.0 {
+@@ -212,6 +221,14 @@
+             || (sol.strip_width() <= best_sol.strip_width()
+                 && compactness(&sol) < compactness(&best_sol))
+         {
++            if !sep.solution_is_certified(&sol, &best_sol) {
++                log::warn!(
++                    "[POLISH] rejecting candidate before callback: exact/constraint validation failed"
++                );
++                sep.rollback(&best_sol, None);
++                exit = PolishExit::RolledBackInfeasible;
++                break;
++            }
+             best_sol = sol;
+             if width_improved {
+                 if let Some(l) = sol_listener.as_deref_mut() {
+@@ -240,18 +257,7 @@
+         }
+     }
+ 
+-    if crate::structure::pipeline::solution_validation_error_with_frozen(
+-        instance,
+-        &best_sol,
+-        &sep.frozen_mask,
+-    )
+-    .is_some()
+-        || !crate::util::assertions::frozen_poses_preserved(init_sol, &best_sol, &sep.frozen_mask)
+-    {
+-        best_sol = init_sol.clone();
+-        exit = PolishExit::RolledBackInfeasible;
+-    }
+-
++    // Initial and every accepted incumbent were certified before publication.
+     // 최종적으로 가장 좋은 해로 맞춰 둔다.
+     sep.rollback(&best_sol, None);
+ 
+--- swarm-core\src\structure\pipeline.rs
++++ swarm-core\src\structure\pipeline.rs
+@@ -780,6 +780,7 @@
+         p2_compress_rng,
+         p2_cfg.separator_config,
+     );
++    p2_sep.configure_reinsertion(nfp_integration);
+     p2_sep.freeze_items(frozen_item_ids);
+     terminator.new_timeout(p2_cfg.time_limit);
+     let p2_solution = compression_phase(
+@@ -845,6 +846,7 @@
+         p3_explore_rng,
+         p3_cfg.separator_config,
+     );
++    p3_sep.configure_reinsertion(nfp_integration);
+     p3_sep.freeze_items(frozen_item_ids);
+     terminator.new_timeout(p3_cfg.time_limit);
+     if config.p3_slack_ratio > 0.0 && !terminator.kill() {
+@@ -940,6 +942,7 @@
+             next_rng(),
+             cycle_sep_cfg,
+         );
++        cycle_sep.configure_reinsertion(nfp_integration);
+         cycle_sep.freeze_items(frozen_item_ids);
+         let rnr_cfg = RuinRecreateConfig {
+             period: 1,
+@@ -1067,6 +1070,7 @@
+         p5_polish_rng.clone(),
+         p5_sep_cfg,
+     );
++    p5_sep.configure_reinsertion(nfp_integration);
+     p5_sep.freeze_items(frozen_item_ids);
+     let mut p5_seed = before_p5.clone();
+     // Snap repair and polish share one absolute P5 budget.
+@@ -1086,6 +1090,7 @@
+                 p5_polish_rng,
+                 p5_sep_cfg,
+             );
++            p5_sep.configure_reinsertion(nfp_integration);
+             p5_sep.freeze_items(frozen_item_ids);
+             p5_seed = before_p5.clone();
+         }
+--- swarm-core\tests\frozen_policy.rs
++++ swarm-core\tests\frozen_policy.rs
+@@ -82,6 +82,7 @@
+             DEFAULT_SWARM_CONFIG.expl_cfg.separator_config,
+         );
+         sep.freeze_items(&[0, 1]);
++        assert!(sep.solution_is_certified(&sep.prob.save(), &saved));
+         assert_eq!(sep.min_feasible_width(), None);
+         sep.change_strip_width(15.0, None);
+         assert!(swarm_core::util::assertions::frozen_poses_preserved(
+--- swarm-core\tests\lns_smoke.rs
++++ swarm-core\tests\lns_smoke.rs
+@@ -348,20 +348,18 @@
+     term.new_timeout(Duration::from_secs(15));
+     let sols = exploration_phase_adaptive(&instance, &mut sep, &mut None, &term, &expl_cfg);
+ 
+-    assert!(
+-        !sols.is_empty(),
+-        "exploration must return at least the initial solution"
+-    );
+-    let n_items = instance.total_item_qty();
+-    let last = sols.last().unwrap();
+-    assert_eq!(
+-        last.layout_snapshot.placed_items.len(),
+-        n_items,
+-        "all items must remain placed"
+-    );
+-    assert!(
+-        last.strip_width() <= sols.first().unwrap().strip_width(),
+-        "width must not regress"
++    // This fixture starts infeasible. A timed-out repair may legitimately yield
++    // no certified incumbent; every returned result must nevertheless be exact.
++    for sol in &sols {
++        assert_eq!(
++            sol.layout_snapshot.placed_items.len(),
++            instance.total_item_qty()
++        );
++        assert!(sep.solution_is_certified(sol, sol));
++    }
++    assert!(
++        sols.windows(2)
++            .all(|pair| pair[1].strip_width() <= pair[0].strip_width())
+     );
+ 
+     let logs = LOGS.get().unwrap().lock().unwrap();
+--- swarm-core\tests\overlap_semantics.rs
++++ swarm-core\tests\overlap_semantics.rs
+@@ -46,8 +46,8 @@
+ use swarm_core::consts::LBF_SAMPLE_CONFIG;
+ use swarm_core::optimizer::lbf::LBFBuilder;
+ use swarm_core::optimizer::separator::Separator;
++use swarm_core::util::io::read_spp_input;
+ use swarm_core::util::terminator::{BasicTerminator, Terminator};
+-use swarm_core::util::io::read_spp_input;
+ use std::path::Path;
+ use std::time::Duration;
+ 
+@@ -220,7 +220,9 @@
+     println!("║    **공정 판단에는 이 수치를 써라** — 승인한 겹침 값과 따로 봐야 한다.");
+     println!("║  · **밀도 열은 참고용이다.** 이 하네스는 후처리를 안 돌리고 시드도 1개다.");
+     println!("║    밀도 비교는 `pipeline_sweep` 으로 하라 — 여기 값과 다르다.");
+-    println!("║  · 밀도 분모는 공칭 폭 x 공칭 높이다(`Container::area()` 가 `outer_orig` 를 쓴다).");
++    println!(
++        "║  · 밀도 분모는 공칭 폭 x 공칭 높이다(`Container::area()` 가 `outer_orig` 를 쓴다)."
++    );
+     println!("║    컨테이너를 줄였으므로 밀도는 과대평가되지 않는다 — 오히려 보수적이다.");
+     println!("╚══════════════════════════════════════════════════════════════════════");
+ }
+@@ -368,3 +370,136 @@
+         bbox.y_min
+     );
+ }
++
++/// Compare actual source polygons after both postprocessing phases, not just config fields.
++#[test]
++fn compress_and_polish_preserve_piece_overlap_geometry_and_certify_callbacks() {
++    use jagua_rs::geometry::DTransformation;
++    use jagua_rs::probs::spp::entities::SPPlacement;
++    use jagua_rs::probs::spp::io::ext_repr::ExtSPInstance;
++    use swarm_core::structure::pipeline::solution_validation_error;
++    use swarm_core::util::listener::{ReportType, SolutionListener};
++    struct ExactListener(usize);
++    impl SolutionListener for ExactListener {
++        fn report(&mut self, kind: ReportType, sol: &SPSolution, inst: &SPInstance) {
++            if matches!(
++                kind,
++                ReportType::CmprFeas | ReportType::ExplFeas | ReportType::Final
++            ) {
++                assert!(solution_validation_error(inst, sol).is_none());
++                self.0 += 1;
++            }
++        }
++    }
++    let raw_overlap = |inst: &SPInstance, sol: &SPSolution| {
++        let boxes: Vec<_> = sol
++            .layout_snapshot
++            .placed_items
++            .values()
++            .map(|p| {
++                let item = inst.item(p.item_id);
++                let ext = int_to_ext_transformation(&p.d_transf, &item.shape_orig.pre_transform);
++                item.shape_orig.shape.transform_clone(&ext.compose()).bbox
++            })
++            .collect();
++        let dx = boxes[0].x_max.min(boxes[1].x_max) - boxes[0].x_min.max(boxes[1].x_min);
++        let dy = boxes[0].y_max.min(boxes[1].y_max) - boxes[0].y_min.max(boxes[1].y_min);
++        dx.min(dy).max(0.0)
++    };
++    for lp_enabled in [false, true] {
++        for overlap in [0.0_f32, 2.0] {
++            let ext: ExtSPInstance = serde_json::from_value(serde_json::json!({
++                "name":"postprocess-overlap", "strip_height":50.0,
++                "items":(0..2).map(|id| serde_json::json!({"id":id,"demand":1,
++                    "allowed_orientations":[0.0],"shape":{"type":"rectangle","data":{
++                        "x_min":0.0,"y_min":0.0,"width":40.0,"height":40.0}}})).collect::<Vec<_>>()
++            }))
++            .unwrap();
++            let c = DEFAULT_SWARM_CONFIG;
++            let instance = swarm_core::util::io::import_spp_instance(
++                &ext,
++                c.cde_config,
++                None,
++                Some(-overlap),
++                None,
++            )
++            .unwrap();
++            assert!((instance.item(0).shape_cd.bbox.width() - (40.0 - overlap)).abs() < 0.01);
++            let mut prob = SPProblem::new(instance.clone());
++            prob.change_strip_width(90.0);
++            for (item_id, x) in [(0, 25.0), (1, 66.0)] {
++                prob.place_item(SPPlacement {
++                    item_id,
++                    d_transf: DTransformation::new(0.0, (x, 25.0)),
++                });
++            }
++            let seed = prob.save();
++            assert!(solution_validation_error(&instance, &seed).is_none());
++            let mut cmpr = c.cmpr_cfg;
++            cmpr.time_limit = Duration::from_secs(1);
++            cmpr.shrink_range = (0.03, 0.001);
++            cmpr.shrink_decay = swarm_core::config::ShrinkDecayStrategy::FailureBased(0.5);
++            cmpr.separator_config.n_workers = 1;
++            cmpr.separator_config.iter_no_imprv_limit = 15;
++            cmpr.separator_config.strike_limit = 1;
++            let mut sep = Separator::new(
++                instance.clone(),
++                prob,
++                Xoshiro256PlusPlus::seed_from_u64(31),
++                cmpr.separator_config,
++            );
++            let mut listener = ExactListener(0);
++            let mut term = BasicTerminator::new();
++            term.new_timeout(cmpr.time_limit);
++            let compressed = swarm_core::optimizer::compress::compression_phase(
++                &instance,
++                &mut sep,
++                &seed,
++                &mut Some(&mut listener),
++                &term,
++                &cmpr,
++            );
++            assert!(compressed.strip_width() < seed.strip_width());
++            assert!(solution_validation_error(&instance, &compressed).is_none());
++            let compressed_overlap = raw_overlap(&instance, &compressed);
++            let mut polish = c.polish_cfg;
++            polish.enabled = true;
++            polish.lp.enabled = lp_enabled;
++            polish.slide.enabled = true;
++            polish.hole_fill.enabled = true;
++            polish.reclaim.enabled = false;
++            polish.time_limit = Duration::from_secs(1);
++            term.new_timeout(polish.time_limit);
++            let polished = swarm_core::optimizer::polish::polish_phase_with_nfp(
++                &instance,
++                &mut sep,
++                &compressed,
++                &mut Some(&mut listener),
++                &term,
++                &polish,
++                &c.nfp_integration,
++                &c.lp_solver,
++            );
++            let polished_overlap = raw_overlap(&instance, &polished);
++            assert!(solution_validation_error(&instance, &polished).is_none());
++            assert!(polished.strip_width() <= compressed.strip_width());
++            for actual in [compressed_overlap, polished_overlap] {
++                assert!(
++                    actual <= overlap + 0.01,
++                    "overlap budget exceeded: {actual} > {overlap}"
++                );
++                if overlap > 0.0 {
++                    assert!(actual > 0.5, "postprocess discarded the allowed overlap");
++                }
++            }
++            let bounds = overhang(&instance, &polished, 50.0);
++            assert!(bounds.below <= 0.01 && bounds.above <= 0.01 && bounds.left <= 0.01);
++            assert!(listener.0 > 0);
++            println!(
++                "LP={lp_enabled}, allowance={overlap}mm: Compress overlap={compressed_overlap:.4}, Polish overlap={polished_overlap:.4}, width={:.4}->{:.4}",
++                compressed.strip_width(),
++                polished.strip_width()
++            );
++        }
++    }
++}
+--- swarm-core\tests\postprocess_phases.rs
++++ swarm-core\tests\postprocess_phases.rs
+@@ -150,11 +150,18 @@
+     let initial = problem.save();
+     let mut sep = separator(instance.clone(), problem, 7);
+ 
+-    let moved = slide_pass(&mut sep, &DEFAULT_POLISH_CONFIG.slide, &BasicTerminator::new());
++    let moved = slide_pass(
++        &mut sep,
++        &DEFAULT_POLISH_CONFIG.slide,
++        &BasicTerminator::new(),
++    );
+     sep.refit_strip();
+     let result = sep.prob.save();
+ 
+-    assert!(moved > 0, "detached fixture must trigger at least one slide move");
++    assert!(
++        moved > 0,
++        "detached fixture must trigger at least one slide move"
++    );
+     assert_complete_exact(&instance, &result);
+     assert_separator_sync(&sep);
+     assert!(
+@@ -197,7 +204,10 @@
+     let moved = slide_pass(&mut sep, &DEFAULT_POLISH_CONFIG.slide, &term);
+     let result = sep.prob.save();
+ 
+-    assert_eq!(moved, 0, "converged layout must not register further slide moves");
++    assert_eq!(
++        moved, 0,
++        "converged layout must not register further slide moves"
++    );
+     assert_complete_exact(&instance, &result);
+     assert!(
+         (result.strip_width() - converged.strip_width()).abs() < 1.0e-4,
+@@ -445,3 +455,113 @@
+     assert!(report.is_none());
+     assert_complete_exact(&instance, &solution);
+ }
++
++#[test]
++fn grouped_pocket_walls_allow_ungrouped_hole_fill() {
++    let instance = import_instance(serde_json::json!({
++        "name":"hole-fill-positive",
++        "strip_height":20.0,
++        "items":[
++            {"id":0,"demand":1,"allowed_orientations":[0.0],"shape":{
++                "type":"rectangle","data":{"x_min":0.0,"y_min":0.0,"width":2.0,"height":12.0}
++            }},
++            {"id":1,"demand":1,"allowed_orientations":[0.0],"shape":{
++                "type":"rectangle","data":{"x_min":0.0,"y_min":0.0,"width":2.0,"height":12.0}
++            }},
++            {"id":2,"demand":1,"allowed_orientations":[0.0],"shape":{
++                "type":"rectangle","data":{"x_min":0.0,"y_min":0.0,"width":7.8,"height":2.0}
++            }},
++            {"id":3,"demand":1,"allowed_orientations":[0.0],"shape":{
++                "type":"rectangle","data":{"x_min":0.0,"y_min":0.0,"width":7.8,"height":2.0}
++            }},
++            {"id":4,"demand":1,"allowed_orientations":[0.0],"shape":{
++                "type":"rectangle","data":{"x_min":0.0,"y_min":0.0,"width":2.0,"height":2.0}
++            }}
++        ]
++    }));
++    let problem = placed_problem(
++        &instance,
++        30.0,
++        &[
++            (0, 5.0, 10.0),
++            (1, 15.0, 10.0),
++            (2, 10.0, 5.0),
++            (3, 10.0, 15.0),
++            (4, 25.0, 9.0),
++        ],
++    );
++    let mut sep = separator(instance.clone(), problem, 202);
++    use swarm_core::optimizer::place_groups::{PlaceGroupMember, PlaceGroupSpec, PlaceGroups};
++    let members = sep
++        .prob
++        .layout
++        .placed_items
++        .values()
++        .filter(|pi| pi.item_id < 4)
++        .map(|pi| PlaceGroupMember {
++            item_id: pi.item_id,
++            initial_transform: pi.d_transf,
++        })
++        .collect();
++    sep.set_place_groups(
++        PlaceGroups::new(&instance, vec![PlaceGroupSpec { id: 7, members }]).unwrap(),
++    )
++    .unwrap();
++    let initial = sep.prob.save();
++    let candidate_before = sep
++        .prob
++        .layout
++        .placed_items
++        .values()
++        .find(|placed| placed.item_id == 4)
++        .unwrap()
++        .shape
++        .bbox
++        .x_max;
++    let mut config = DEFAULT_POLISH_CONFIG.hole_fill;
++    config.cell_size_ratio = 0.5;
++    config.max_cells = 20_000;
++    config.candidate_band = 0.5;
++    config.n_samples_per_pocket = 256;
++    config.n_coord_descents = 1;
++
++    let moved = hole_fill_pass(&mut sep, &config, &BasicTerminator::new());
++    let candidate_after = sep
++        .prob
++        .layout
++        .placed_items
++        .values()
++        .find(|placed| placed.item_id == 4)
++        .unwrap()
++        .shape
++        .bbox
++        .x_max;
++    let result = sep.prob.save();
++
++    assert!(
++        moved >= 1,
++        "at least the right-band candidate must fill the pocket"
++    );
++    assert!(candidate_after < candidate_before - 1.0);
++    assert_complete_exact(&instance, &result);
++    assert!(sep.prob.layout.is_feasible());
++    assert_separator_sync(&sep);
++    assert!(sep.solution_is_certified(&sep.prob.save(), &initial));
++    for pi in initial
++        .layout_snapshot
++        .placed_items
++        .values()
++        .filter(|pi| pi.item_id < 4)
++    {
++        assert_eq!(
++            pi.d_transf,
++            sep.prob
++                .layout
++                .placed_items
++                .values()
++                .find(|q| q.item_id == pi.item_id)
++                .unwrap()
++                .d_transf
++        );
++    }
++}
+--- swarm-core\tests\rr_hole_swap_probe.rs
++++ swarm-core\tests\rr_hole_swap_probe.rs
+@@ -107,9 +107,8 @@
+     }
+ }
+ #[test]
+-fn one_rigid_group_disables_all_three_single_item_operators() {
++fn a_rigid_group_remains_unchanged_while_ungrouped_rnr_runs() {
+     use swarm_core::optimizer::place_groups::{PlaceGroupMember, PlaceGroupSpec, PlaceGroups};
+-    use swarm_core::optimizer::polish::holes::hole_fill_pass;
+     use swarm_core::util::terminator::BasicTerminator;
+     let mut sep = build_colliding_separator(42);
+     let members = sep
+@@ -127,27 +126,115 @@
+     sep.set_place_groups(groups).unwrap();
+     let before = poses(&sep);
+     let term = BasicTerminator::new();
+-    assert_eq!(
+-        ruin_and_recreate(
+-            &mut sep,
+-            &DEFAULT_SWARM_CONFIG.expl_cfg.rnr,
+-            RuinStrategy::Rightmost,
+-            &mut BandTabu::new(),
+-            &term
+-        ),
+-        0
+-    );
+-    assert_eq!(swap_pass(&mut sep, 100, &term), 0);
+-    assert_eq!(
+-        hole_fill_pass(
+-            &mut sep,
+-            &DEFAULT_SWARM_CONFIG.polish_cfg.hole_fill,
+-            &term
+-        ),
+-        0
+-    );
+-    assert_eq!(before, poses(&sep));
+-    println!("One rigid group: RNR=0, swap_pass=0, hole_fill=0; all poses unchanged");
++    let count = ruin_and_recreate(
++        &mut sep,
++        &DEFAULT_SWARM_CONFIG.expl_cfg.rnr,
++        RuinStrategy::Rightmost,
++        &mut BandTabu::new(),
++        &term,
++    );
++    assert!(count > 0, "ungrouped RNR must be active");
++    let after = poses(&sep);
++    assert!(before.iter().any(|(id, dt)| after.get(id) != Some(dt)));
++    for (id, dt) in &before {
++        if sep.place_groups.group_id_of(*id).is_some() {
++            assert_eq!(after.get(id), Some(dt));
++        }
++    }
++    assert!(
++        sep.place_groups
++            .solution_preserves_relative_poses(&sep.prob.save())
++    );
++    assert!(tracker_matches_layout(&sep.ct, &sep.prob.layout));
++}
++
++#[test]
++fn grouped_separator_swap_can_improve_without_increasing_collision_loss() {
++    use swarm_core::optimizer::place_groups::{PlaceGroupMember, PlaceGroupSpec, PlaceGroups};
++    use swarm_core::util::terminator::BasicTerminator;
++    let mut accepted = 0;
++    for seed in [7, 42, 103] {
++        let mut sep = build_colliding_separator(seed);
++        let members = sep
++            .prob
++            .layout
++            .placed_items
++            .values()
++            .take(2)
++            .map(|pi| PlaceGroupMember {
++                item_id: pi.item_id,
++                initial_transform: pi.d_transf,
++            })
++            .collect();
++        sep.set_place_groups(
++            PlaceGroups::new(&sep.instance, vec![PlaceGroupSpec { id: 1, members }]).unwrap(),
++        )
++        .unwrap();
++        let before = poses(&sep);
++        for _ in 0..160 {
++            let raw = sep.ct.get_total_loss();
++            let weighted = sep.ct.get_total_weighted_loss();
++            accepted += swap_pass(&mut sep, 1, &BasicTerminator::new());
++            assert!(
++                sep.ct.get_total_loss() <= raw + raw.abs().max(1.0) * 1e-5,
++                "raw {raw} -> {}",
++                sep.ct.get_total_loss()
++            );
++            assert!(sep.ct.get_total_weighted_loss() <= weighted + weighted.abs().max(1.0) * 1e-5);
++        }
++        let after = poses(&sep);
++        for (id, dt) in &before {
++            if sep.place_groups.group_id_of(*id).is_some() {
++                assert_eq!(after.get(id), Some(dt));
++            }
++        }
++        assert!(tracker_matches_layout(&sep.ct, &sep.prob.layout));
++    }
++    assert!(
++        accepted > 0,
++        "the grouped lane must actually accept an ungrouped swap"
++    );
++    println!("Grouped separator swap accepted={accepted}");
++}
++
++#[test]
++fn zero_tracker_loss_cannot_publish_an_infeasible_initial_layout() {
++    use swarm_core::optimizer::explore_mods::exploration_phase_adaptive;
++    use swarm_core::quantify::tracker::CollisionTracker;
++    use swarm_core::util::listener::{ReportType, SolutionListener};
++    struct Listener(usize);
++    impl SolutionListener for Listener {
++        fn report(
++            &mut self,
++            kind: ReportType,
++            _: &jagua_rs::probs::spp::entities::SPSolution,
++            _: &SPInstance,
++        ) {
++            if kind == ReportType::ExplFeas {
++                self.0 += 1;
++            }
++        }
++    }
++    let mut sep = build_colliding_separator(42);
++    let initial = sep.prob.save();
++    assert!(!sep.solution_is_certified(&initial, &initial));
++    // Keep valid tracker keys, but simulate stale collision exemptions.
++    sep.ct = CollisionTracker::new_with_frozen(
++        &sep.prob.layout,
++        &vec![true; sep.instance.total_item_qty()],
++    );
++    let mut listener = Listener(0);
++    let instance = sep.instance.clone();
++    let sols = exploration_phase_adaptive(
++        &instance,
++        &mut sep,
++        &mut Some(&mut listener),
++        &swarm_core::util::terminator::BasicTerminator::new(),
++        &DEFAULT_SWARM_CONFIG.expl_cfg,
++    );
++    assert!(sols.is_empty());
++    assert_eq!(listener.0, 0);
++    assert!(tracker_matches_layout(&sep.ct, &sep.prob.layout));
+ }
+ 
+ #[test]
+@@ -210,8 +297,12 @@
+ 
+     assert!(
+         !sols.is_empty(),
+-        "exploration must return at least the initial solution"
+-    );
++        "this fixture must reach a certified solution"
++    );
++    for sol in &sols {
++        assert!(sep.solution_is_certified(sol, sol));
++    }
++    assert!(sep.solution_is_certified(&sep.prob.save(), sols.last().unwrap()));
+     let n_items = instance.total_item_qty();
+     let last = sols.last().unwrap();
+     assert_eq!(
+--- swarm-core\tests\stop_latency.rs
++++ swarm-core\tests\stop_latency.rs
+@@ -123,10 +123,8 @@
+         sols.len()
+     );
+ 
+-    assert!(
+-        !sols.is_empty(),
+-        "must return at least the initial solution"
+-    );
++    // Entry was deliberately infeasible; cancellation may leave no certified solution.
++    assert!(sols.iter().all(|sol| sep.solution_is_certified(sol, sol)));
+     // 안쪽 루프에서 중단을 확인하지 않으면 여기서 수 초가 나온다.
+     assert!(
+         latency < Duration::from_millis(1500),
+@@ -136,7 +134,10 @@
+ }
+ 
+ /// 정지 플래그를 `sleep` 뒤에 세우는 스레드를 띄우고, 세운 시각을 돌려준다.
+-fn arm_stop_after(stop: &Arc<AtomicBool>, delay: Duration) -> Arc<std::sync::Mutex<Option<Instant>>> {
++fn arm_stop_after(
++    stop: &Arc<AtomicBool>,
++    delay: Duration,
++) -> Arc<std::sync::Mutex<Option<Instant>>> {
+     let requested_at = Arc::new(std::sync::Mutex::new(None::<Instant>));
+     let stop = stop.clone();
+     let at = requested_at.clone();
+@@ -192,7 +193,10 @@
+     outer.new_timeout(Duration::ZERO);
+     let deadline = Instant::now() + Duration::from_secs(60);
+     let reclaim_cfg = c.polish_cfg.reclaim; // 기본 켜짐, CompressReentry, min_slice 500ms
+-    assert!(reclaim_cfg.enabled, "기본값이 꺼짐이면 이 테스트는 아무것도 재지 않는다");
++    assert!(
++        reclaim_cfg.enabled,
++        "기본값이 꺼짐이면 이 테스트는 아무것도 재지 않는다"
++    );
+ 
+     let requested_at = arm_stop_after(&stop, Duration::from_secs(2));
+     let (_best, stats) = swarm_core::optimizer::reclaim::reclaim_leftover(
+@@ -210,7 +214,10 @@
+         &outer,
+     );
+     let returned_at = Instant::now();
+-    let requested = requested_at.lock().unwrap().expect("stop was never requested");
++    let requested = requested_at
++        .lock()
++        .unwrap()
++        .expect("stop was never requested");
+     let latency = returned_at.duration_since(requested);
+     println!(
+         "reclaim stop latency: {:.0} ms (사이클 {}, 미사용 {} ms)",
+@@ -218,7 +225,10 @@
+         stats.cycles,
+         stats.unused_ms
+     );
+-    assert!(stats.cycles >= 1, "회수 사이클이 시작되기 전에 끝났다 — 정지 경로를 재지 못했다");
++    assert!(
++        stats.cycles >= 1,
++        "회수 사이클이 시작되기 전에 끝났다 — 정지 경로를 재지 못했다"
++    );
+     assert!(
+         latency < Duration::from_millis(1500),
+         "reclaim stop took too long: {:.0} ms — 조각 터미네이터가 바깥 정지 플래그를 안 본다",
+@@ -279,7 +289,10 @@
+         return;
+     };
+     let latency = returned_at.duration_since(requested);
+-    println!("polish stop latency: {:.0} ms", latency.as_secs_f32() * 1000.0);
++    println!(
++        "polish stop latency: {:.0} ms",
++        latency.as_secs_f32() * 1000.0
++    );
+     let lp_bound = Duration::from_millis(1500);
+     assert!(
+         latency < lp_bound,
+--- src\ffi_step.rs
++++ src\ffi_step.rs
+@@ -2320,6 +2320,7 @@
+     term: &impl swarm_core::util::terminator::Terminator,
+     expl_config: &ExplorationConfig,
+ ) -> Vec<SPSolution> {
++    sep.configure_reinsertion(&nfp_integration);
+     if nfp_integration.ordering_exploration {
+         log::info!("[STEP] exploration phase: 순수 NFP 순서 탐색 (ordering_exploration)");
+         let mut seed = *nfp_lbf;
+--- src\grouped_engine.rs
++++ src\grouped_engine.rs
+@@ -1679,6 +1679,7 @@
+             next_rng(&mut self.rng),
+             config,
+         );
++        sep.configure_reinsertion(&self.config.nfp_integration);
+         sep.set_place_groups(self.place_groups.clone())
+             .expect("validated place groups must fit the lane layout");
+         sep.freeze_items(&self.frozen_ids);

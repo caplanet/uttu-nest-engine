@@ -1,0 +1,1 @@
+{"_note":"full_band 대량 파괴 + 착석률 가드 60% — 못 앉으면 트랜잭션 롤백(loss 폭증 차단)","band_rearrange.post_shrink":1,"band_rearrange.full_band":1,"band_rearrange.min_clear_reinsert_ratio":0.6}

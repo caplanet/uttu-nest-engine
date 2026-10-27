@@ -1,0 +1,1 @@
+{"_note":"band_full + GLS 상한만 1e6 -> 1e12. 증가율은 기본 유지 — 포화 시점만 뒤로 민다","band_rearrange.post_shrink":1,"band_rearrange.full_band":1,"gls.max_weight":1.0e12}

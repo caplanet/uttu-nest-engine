@@ -1,0 +1,4734 @@
+--- a/csharp/CAPlanetSwarmSample.WPF/Views/WorkspaceViewModel.cs
++++ b/csharp/CAPlanetSwarmSample.WPF/Views/WorkspaceViewModel.cs
+@@ -1753,7 +1753,16 @@
+     {
+         try
+         {
+-            bool applied = SwarmOptimizer.TrySetShrinkStep(this.ShrinkStepInput);
++            bool applied;
++            lock (_OptimizerSync)
++            {
++                if (_StepOptimizer is null || !_StepOptimizer.IsInitialized)
++                {
++                    this.ShrinkStepStatus = "실행 중인 솔버가 없습니다.";
++                    return;
++                }
++                applied = _StepOptimizer.TrySetShrinkStep(this.ShrinkStepInput);
++            }
+             this.ShrinkStepStatus = applied
+                 ? $"적용됨 · shrink step {this.ShrinkStepInput:0.#####}"
+                 : $"거부됨 · 0 < step < 1 범위여야 합니다 (입력 {this.ShrinkStepInput:0.#####})";
+--- a/csharp/Natives/SwarmNative.cs
++++ b/csharp/Natives/SwarmNative.cs
+@@ -121,6 +121,9 @@
+         "swarm_set_shrink_step",
+         "swarm_clear_shrink_step",
+         "swarm_get_shrink_step",
++        "swarm_set_handle_shrink_step",
++        "swarm_clear_handle_shrink_step",
++        "swarm_get_handle_shrink_step",
+         "swarm_set_log_callback",
+         "swarm_log_dropped_count",
+         "swarm_request_stop_and_wait",
+@@ -1408,25 +1411,20 @@
+     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+     public static extern int swarm_is_stop_requested(IntPtr handle);
+ 
+-    /// <summary>
+-    /// 탐색(Exploration) 단계의 폭 축소 스텝을 <b>실행 중에</b> 재설정한다.
+-    /// <para>
+-    /// 탐색이 도는 도중에 호출해도 된다. 다음 축소 시점부터 반영되며, 진행 중인
+-    /// separation은 중단 없이 끝까지 간다. 설정은 프로세스 전역이라 핸들을 받지 않는다.
+-    /// </para>
+-    /// </summary>
+-    /// <param name="step">현재 폭 대비 축소 비율. 유효 범위 0 &lt; step &lt; 1 (예: 0.001 = 0.1%).</param>
+-    /// <returns>1 = 적용됨, 0 = 값이 범위 밖이라 아무것도 바꾸지 않음.</returns>
++    /// <summary>Default for subsequently created handles; does not update running handles.</summary>
+     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+     public static extern int swarm_set_shrink_step(float step);
+-
+-    /// <summary>실행 중 재설정한 축소 스텝을 해제하고 설정 파일 값으로 되돌린다.</summary>
+     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+     public static extern void swarm_clear_shrink_step();
+-
+-    /// <summary>현재 적용 중인 축소 스텝 오버라이드. 0보다 크면 그 값, -1이면 오버라이드 없음.</summary>
+     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+     public static extern float swarm_get_shrink_step();
++
++    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
++    public static extern int swarm_set_handle_shrink_step(IntPtr handle, float step);
++    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
++    public static extern void swarm_clear_handle_shrink_step(IntPtr handle);
++    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
++    public static extern float swarm_get_handle_shrink_step(IntPtr handle);
+ 
+     /// <summary>
+     /// 네이티브 로그 수신 델리게이트.
+--- a/csharp/Natives/SwarmOptimizer.cs
++++ b/csharp/Natives/SwarmOptimizer.cs
+@@ -1529,7 +1529,7 @@
+     public static class SwarmOptimizer
+     {
+         /// <summary>
+-        /// 탐색 단계의 폭 축소 스텝을 실행 중에 재설정한다.
++        /// 이후 생성할 솔버의 기본 축소 스텝을 설정한다. 실행 중 변경은 SwarmStepOptimizer.TrySetShrinkStep을 사용한다.
+         /// </summary>
+         /// <param name="step">현재 폭 대비 축소 비율 (0 &lt; step &lt; 1).</param>
+         /// <returns>적용 성공 여부. 범위 밖 값이면 <c>false</c>이고 기존 값이 유지된다.</returns>
+@@ -1539,7 +1539,7 @@
+             return SwarmNative.swarm_set_shrink_step((float)step) != 0;
+         }
+ 
+-        /// <summary>실행 중 재설정한 축소 스텝을 해제한다.</summary>
++        /// <summary>이후 생성할 솔버의 기본 축소 스텝을 해제한다.</summary>
+         public static void ClearShrinkStep()
+         {
+             SwarmNative.EnsureCompatible();
+@@ -2184,6 +2184,35 @@
+                     this._ActiveSolutionGetters--;
+                     Monitor.PulseAll(this._CallbackSync);
+                 }
++            }
++        }
++
++        /// <summary>이 솔버의 실행 중 축소 스텝만 변경한다.</summary>
++        public bool TrySetShrinkStep(double step)
++        {
++            lock (this._CallbackSync)
++            {
++                return !this._IsDisposed && this._SwarmHandle != IntPtr.Zero
++                    && SwarmNative.swarm_set_handle_shrink_step(this._SwarmHandle, (float)step) != 0;
++            }
++        }
++
++        public void ClearShrinkStep()
++        {
++            lock (this._CallbackSync)
++            {
++                if (!this._IsDisposed && this._SwarmHandle != IntPtr.Zero)
++                    SwarmNative.swarm_clear_handle_shrink_step(this._SwarmHandle);
++            }
++        }
++
++        public double? CurrentShrinkStep()
++        {
++            lock (this._CallbackSync)
++            {
++                if (this._IsDisposed || this._SwarmHandle == IntPtr.Zero) return null;
++                float value = SwarmNative.swarm_get_handle_shrink_step(this._SwarmHandle);
++                return value > 0 ? value : null;
+             }
+         }
+ 
+--- a/include/swarm.h
++++ b/include/swarm.h
+@@ -493,6 +493,18 @@
+ /** Set the item IDs that must remain fixed during subsequent phases. */
+ void swarm_freeze_items(void *handle, const int32_t *ids, int32_t count);
+ 
++/** Defaults for future handles; do not affect an active solver. */
++int swarm_set_shrink_step(float step);
++void swarm_clear_shrink_step(void);
++float swarm_get_shrink_step(void);
++
++/** Live, handle-local shrink control; safe during a running phase.
++ * Setter returns 1 on success, 0 for invalid input/handle. Getter returns -1
++ * when unset. As with stop, the caller must keep the handle alive. */
++int swarm_set_handle_shrink_step(const void *handle, float step);
++void swarm_clear_handle_shrink_step(const void *handle);
++float swarm_get_handle_shrink_step(const void *handle);
++
+ /** Request cancellation. Cancellation is permanent for the lifetime of this handle. */
+ void swarm_request_stop(void *handle);
+ 
+--- a/swarm-core/src/config.rs
++++ b/swarm-core/src/config.rs
+@@ -1053,85 +1053,129 @@
+     },
+ };
+ 
+-
+-/// 실행 중에 바꿀 수 있는 탐색 파라미터.
+-///
+-/// [`ExplorationConfig`]는 `Copy`라 탐색 루프 깊숙이 값으로 복사되어 들어간다. 그래서
+-/// 이미 시작된 탐색의 파라미터를 밖에서 바꾸려면 별도의 공유 채널이 필요하다.
+-///
+-/// 프로세스 전역이다 — 한 프로세스에서 동시에 여러 해를 푸는 구성이라면 마지막 설정이
+-/// 모두에 적용된다. 현재 FFI(`swarm_init` -> 단계별 호출)는 핸들 하나를 순차로 쓰는
+-/// 모델이라 이 범위로 충분하다.
++/// Per-run dynamic exploration control. Legacy global functions set defaults
++/// for future runs; a running handle always owns its own atomic control.
+ pub mod runtime {
+-    use std::sync::atomic::{AtomicU32, Ordering};
+-
+-    /// f32 비트 패턴. `NOT_SET`이면 설정 안 함.
+-    static SHRINK_STEP: AtomicU32 = AtomicU32::new(NOT_SET);
+-
+-    /// "설정 안 함" 표식. 유효한 shrink step은 `(0, 1)` 범위라 이 비트 패턴과 겹치지 않는다.
++    use std::cell::RefCell;
++    use std::sync::{
++        Arc,
++        atomic::{AtomicU32, Ordering},
++    };
+     const NOT_SET: u32 = u32::MAX;
+-
+-    /// 탐색 단계의 폭 축소 스텝을 실행 중에 덮어쓴다.
+-    ///
+-    /// 다음 축소 시점부터 반영된다. 진행 중인 separation은 끝까지 간다.
+-    ///
+-    /// 유효 범위는 `0.0 < step < 1.0`이다 (폭 대비 비율). 범위 밖이거나 비유한이면
+-    /// 아무것도 바꾸지 않고 `false`를 돌려준다.
++    static DEFAULT_SHRINK_STEP: AtomicU32 = AtomicU32::new(NOT_SET);
++    thread_local! { static ACTIVE: RefCell<Option<Arc<RunControl>>> = const { RefCell::new(None) }; }
++
++    #[derive(Debug)]
++    pub struct RunControl {
++        shrink_step: AtomicU32,
++    }
++    impl Default for RunControl {
++        fn default() -> Self {
++            Self {
++                shrink_step: AtomicU32::new(NOT_SET),
++            }
++        }
++    }
++    impl RunControl {
++        pub fn from_defaults() -> Arc<Self> {
++            Arc::new(Self {
++                shrink_step: AtomicU32::new(DEFAULT_SHRINK_STEP.load(Ordering::Relaxed)),
++            })
++        }
++        pub fn set_shrink_step(&self, step: f32) -> bool {
++            if !step.is_finite() || step <= 0.0 || step >= 1.0 {
++                return false;
++            }
++            self.shrink_step.store(step.to_bits(), Ordering::Relaxed);
++            true
++        }
++        pub fn clear_shrink_step(&self) {
++            self.shrink_step.store(NOT_SET, Ordering::Relaxed);
++        }
++        pub fn shrink_step(&self) -> Option<f32> {
++            decode(self.shrink_step.load(Ordering::Relaxed))
++        }
++    }
++    fn decode(bits: u32) -> Option<f32> {
++        (bits != NOT_SET).then(|| f32::from_bits(bits))
++    }
++
++    /// Must be dropped on the entering thread, including during unwinding.
++    pub struct Scope {
++        previous: Option<Arc<RunControl>>,
++        _thread: std::marker::PhantomData<std::rc::Rc<()>>,
++    }
++    impl Drop for Scope {
++        fn drop(&mut self) {
++            ACTIVE.with(|slot| *slot.borrow_mut() = self.previous.take());
++        }
++    }
++    pub fn enter(control: Arc<RunControl>) -> Scope {
++        Scope {
++            previous: ACTIVE.with(|slot| slot.replace(Some(control))),
++            _thread: std::marker::PhantomData,
++        }
++    }
++    pub fn current_control() -> Arc<RunControl> {
++        ACTIVE
++            .with(|slot| slot.borrow().clone())
++            .unwrap_or_else(RunControl::from_defaults)
++    }
++    pub fn enter_if_unset(control: Arc<RunControl>) -> Scope {
++        let active = ACTIVE.with(|slot| slot.borrow().clone());
++        enter(active.unwrap_or(control))
++    }
++    /// Legacy API: defaults for future runs only, never a running handle.
+     pub fn set_shrink_step(step: f32) -> bool {
+         if !step.is_finite() || step <= 0.0 || step >= 1.0 {
+             return false;
+         }
+-        let bits = step.to_bits();
+-        // 정상 범위 값이 표식과 같아질 수 없음을 보증한다.
+-        debug_assert_ne!(bits, NOT_SET);
+-        SHRINK_STEP.store(bits, Ordering::Relaxed);
++        DEFAULT_SHRINK_STEP.store(step.to_bits(), Ordering::Relaxed);
+         true
+     }
+-
+-    /// 오버라이드를 해제하고 설정 파일 값으로 되돌린다.
+     pub fn clear_shrink_step() {
+-        SHRINK_STEP.store(NOT_SET, Ordering::Relaxed);
+-    }
+-
+-    /// 현재 오버라이드. 설정되어 있지 않으면 `None`.
++        DEFAULT_SHRINK_STEP.store(NOT_SET, Ordering::Relaxed);
++    }
+     pub fn shrink_step_override() -> Option<f32> {
+-        match SHRINK_STEP.load(Ordering::Relaxed) {
+-            NOT_SET => None,
+-            bits => {
+-                let v = f32::from_bits(bits);
+-                (v.is_finite() && v > 0.0 && v < 1.0).then_some(v)
+-            }
+-        }
+-    }
+-
+-    /// 실제로 쓸 shrink step. 오버라이드가 있으면 그것이, 없으면 `configured`가 이긴다.
+-    #[inline]
++        decode(DEFAULT_SHRINK_STEP.load(Ordering::Relaxed))
++    }
+     pub fn effective_shrink_step(configured: f32) -> f32 {
+-        shrink_step_override().unwrap_or(configured)
++        ACTIVE
++            .with(|slot| slot.borrow().as_ref().and_then(|c| c.shrink_step()))
++            .unwrap_or(configured)
+     }
+ 
+     #[cfg(test)]
+     mod tests {
+         use super::*;
+-
+         #[test]
+-        fn override_round_trips_and_rejects_out_of_range() {
+-            clear_shrink_step();
+-            assert_eq!(shrink_step_override(), None);
++        fn concurrent_controls_are_isolated_and_invalid_updates_are_rejected() {
++            let a = Arc::new(RunControl::default());
++            let b = Arc::new(RunControl::default());
++            a.set_shrink_step(0.02);
++            b.set_shrink_step(0.04);
++            std::thread::scope(|threads| {
++                for (control, expected) in [(a.clone(), 0.02), (b.clone(), 0.04)] {
++                    threads.spawn(move || {
++                        let _scope = enter(control);
++                        for _ in 0..1000 {
++                            assert_eq!(effective_shrink_step(0.001), expected);
++                        }
++                    });
++                }
++            });
++            for bad in [0.0, -0.1, 1.0, f32::NAN, f32::INFINITY] {
++                assert!(!a.set_shrink_step(bad));
++            }
++            assert_eq!(a.shrink_step(), Some(0.02));
++            let _scope = enter(a.clone());
++            {
++                let _nested = enter(b);
++                assert_eq!(effective_shrink_step(0.001), 0.04);
++            }
++            assert_eq!(effective_shrink_step(0.001), 0.02);
++            a.clear_shrink_step();
+             assert_eq!(effective_shrink_step(0.001), 0.001);
+-
+-            assert!(set_shrink_step(0.02));
+-            assert_eq!(shrink_step_override(), Some(0.02));
+-            assert_eq!(effective_shrink_step(0.001), 0.02);
+-
+-            // 범위 밖 값은 기존 설정을 건드리지 않는다.
+-            for bad in [0.0, -0.1, 1.0, 2.0, f32::NAN, f32::INFINITY] {
+-                assert!(!set_shrink_step(bad), "{bad} must be rejected");
+-            }
+-            assert_eq!(shrink_step_override(), Some(0.02));
+-
+-            clear_shrink_step();
+-            assert_eq!(shrink_step_override(), None);
+-        }
+-    }
+-}
++        }
++    }
++}
+--- a/swarm-core/src/escape/pipeline.rs
++++ b/swarm-core/src/escape/pipeline.rs
+@@ -65,9 +65,7 @@
+ 
+ use crate::config::ExplorationConfig;
+ use crate::escape::bottleneck::select_bottleneck_items;
+-use crate::escape::conflict_burst::{
+-    ConflictBurstConfig, ConflictGraph,
+-};
++use crate::escape::conflict_burst::{ConflictBurstConfig, ConflictGraph};
+ use crate::escape::guided::{GuidedPairKey, GuidedWeights};
+ use crate::escape::levels::{EscapeLevel, apply_escape};
+ use crate::escape::stagnation::{StagnationConfig, StagnationDetector};
+@@ -297,17 +295,22 @@
+     escape_config: &AdaptiveEscapeConfig,
+     nfp_cfg: &crate::config::NfpIntegrationConfig,
+ ) -> Vec<SPSolution> {
++    let _run_scope = crate::config::runtime::enter_if_unset(sep.run_control.clone());
+     // 분리 벡터용 NFP 캐시. 플래그가 꺼져 있으면 만들지 않는다.
+     let mut nfp_sep_cache = nfp_cfg
+         .exact_separation_vector
+-        .then(|| crate::optimizer::lns::NfpReinsertionCache::new(
+-            instance,
+-            &[0],
+-            crate::nfp_lbf::DEFAULT_CONCAVE_SIMPLIFY_TOLERANCE,
+-        ))
++        .then(|| {
++            crate::optimizer::lns::NfpReinsertionCache::new(
++                instance,
++                &[0],
++                crate::nfp_lbf::DEFAULT_CONCAVE_SIMPLIFY_TOLERANCE,
++            )
++        })
+         .flatten();
+     if nfp_cfg.exact_separation_vector && nfp_sep_cache.is_none() {
+-        log::warn!("[ESCAPE] 정확한 분리 벡터를 켰지만 NFP 라이브러리를 만들지 못했다 — bbox 근사를 쓴다");
++        log::warn!(
++            "[ESCAPE] 정확한 분리 벡터를 켰지만 NFP 라이브러리를 만들지 못했다 — bbox 근사를 쓴다"
++        );
+     }
+ 
+     let n_patterns = instance.total_item_qty().max(1);
+@@ -896,7 +899,10 @@
+             POST_ESCAPE_EXPLORATION_BOOST,
+         );
+         let expected = base * POST_ESCAPE_EXPLORATION_BOOST / POST_ESCAPE_GLOBAL_BEST_PULL;
+-        assert!((boosted - expected).abs() < 1.0e-6, "{boosted} != {expected}");
++        assert!(
++            (boosted - expected).abs() < 1.0e-6,
++            "{boosted} != {expected}"
++        );
+         assert!(boosted > base);
+ 
+         // 부스트가 끝나면 설정값으로 정확히 복귀한다.
+@@ -916,7 +922,10 @@
+             (-1.0, -1.0, -1.0),
+         ] {
+             let s = pool_selection_stddev(base, pull, boost);
+-            assert!(s.is_finite() && s >= lo && s <= hi, "stddev out of range: {s}");
++            assert!(
++                s.is_finite() && s >= lo && s <= hi,
++                "stddev out of range: {s}"
++            );
+         }
+     }
+ 
+--- a/swarm-core/src/lp_solver/microlp_backend.rs
++++ b/swarm-core/src/lp_solver/microlp_backend.rs
+@@ -33,31 +33,13 @@
+ //! 자유 변수를 쓰는 모델을 새로 만든다면 [`super::LpSolverKind::Clarabel`] 를 쓰거나,
+ //! 변수마다 넉넉한 유한 경계를 명시적으로 넣어라.
+ //!
+-//! # 시간 제한
+-//!
+-//! microlp 0.6 의 [`Problem::set_time_limit`] 은 **단체법 반복 사이에서만** 확인하는
+-//! 소프트 데드라인이다. 한 번의 반복(피벗 + LU 갱신)이 통째로 예산을 넘겨 버리면
+-//! 그 반복이 끝날 때까지 돌아오지 않는다. 그래서 제한을 걸어 두는 것과 별개로,
+-//! **풀고 나서 실제 경과 시간을 재서** 예산을 넘겼으면 [`LpStatus::Limit`] 로 돌린다.
+-//! `Limit` 는 [`LpStatus::is_usable`] 이 거절하므로, 호출부는 늦게 온 해를 채택하지 않는다.
+-//!
+-//! ## 사후 판정이 무엇을 버리는가 — 통합 시 재검토할 것
+-//!
+-//! microlp 0.6 의 순수 LP 경로에서 `SolveOutcome::Solution` 은 **언제나 증명된
+-//! 최적해**다. 소스의 `SolveOutcome::from_lp_stop` 이 `StopReason::Finished` 만
+-//! `Solution`(`ProvenOptimal`)으로 만들고, 데드라인에 걸린 `StopReason::Limit` 은
+-//! 값 없이 `Interrupted` 로 보내기 때문이다. 그래서 사후 판정이 실제로 걸러 내는 것은
+-//! "틀렸을지 모르는 해"가 아니라 **예산보다 조금 늦게 도착한 정답**뿐이다.
+-//!
+-//! 예산이 짧을수록(수십 ms) 마지막 반복이 경계를 넘길 확률이 커지므로, 정답을 손에
+-//! 쥐고도 압축 스텝을 통째로 건너뛰는 일이 반복될 수 있다. 과제 지시가 사후 판정을
+-//! 요구했고 방향이 보수적(틀린 답을 채택하지 않음)이라 그대로 두었으나, 압축 성공률이
+-//! 낮게 나오면 **여기가 첫 번째 의심 지점**이다. 그때는 `Solution` 을 무조건
+-//! [`LpStatus::Optimal`] 로 올리고 제한 강제는 `set_time_limit` 에만 맡기면 된다.
+-//!
+-//! 참고로 예산은 `lp.solve()` 구간만 잰다. 모델 조립(`MicrolpBackend::build`) 시간은
+-//! 포함하지 않는다 — 조립은 입력 크기에 선형이라 예측 가능하고, 그것까지 예산에 넣으면
+-//! 같은 문제가 조립 비용 때문에 `Limit` 이 되어 버린다.
++//! # Cancellation and deadline
++//!
++//! Model assembly and the simplex solve share one deadline. The simplex state
++//! is resumed in 50 ms slices so a caller can cancel between slices without
++//! restarting optimization. A single pivot remains indivisible; this is a soft
++//! deadline, not a hard real-time guarantee. Expired or cancelled results are
++//! returned as `Limit` and are not committed.
+ //!
+ //! # 2차 목적항
+ //!
+@@ -86,12 +68,18 @@
+     /// [`LpProblem::objective`] 의 인덱스와 1:1 로 대응한다.
+     ///
+     /// `problem` 은 이미 [`LpProblem::validate`] 를 통과했다고 가정한다.
+-    fn build(problem: &LpProblem) -> (Problem, Vec<Variable>) {
++    fn build(
++        problem: &LpProblem,
++        should_stop: &dyn Fn() -> bool,
++    ) -> Option<(Problem, Vec<Variable>)> {
+         let mut lp = Problem::new(OptimizationDirection::Minimize);
+         let n = problem.n_vars();
+ 
+         let mut vars = Vec::with_capacity(n);
+         for i in 0..n {
++            if i % 64 == 0 && should_stop() {
++                return None;
++            }
+             // validate() 가 길이를 보장하지만, 인덱싱 대신 get 을 써서 어떤 경우에도
+             // panic 하지 않게 한다. 폴백 대상은 죽으면 안 된다.
+             let c = problem.objective.get(i).copied().unwrap_or(0.0);
+@@ -101,6 +89,9 @@
+         }
+ 
+         for row in problem.rows.iter() {
++            if should_stop() {
++                return None;
++            }
+             let terms = coalesced_terms(row, &vars);
+             if terms.is_empty() {
+                 continue;
+@@ -118,7 +109,7 @@
+             // 양쪽 다 무한이면 제약이 아니다 — 넣지 않는다.
+         }
+ 
+-        (lp, vars)
++        Some((lp, vars))
+     }
+ }
+ 
+@@ -168,6 +159,24 @@
+     }
+ 
+     fn solve(&self, problem: &LpProblem, time_limit: Duration) -> LpSolution {
++        self.solve_with_control(problem, time_limit, &|| false)
++    }
++
++    fn solve_with_control(
++        &self,
++        problem: &LpProblem,
++        time_limit: Duration,
++        should_stop: &dyn Fn() -> bool,
++    ) -> LpSolution {
++        let limited = || LpSolution {
++            status: LpStatus::Limit,
++            x: Vec::new(),
++            objective: f64::NAN,
++            solved_by: NAME,
++        };
++        if should_stop() {
++            return limited();
++        }
+         if let Err(reason) = problem.validate() {
+             log::warn!("[LP] {NAME}: 모델이 유효하지 않다 ({reason})");
+             return LpSolution::failed(NAME);
+@@ -179,13 +188,43 @@
+             );
+         }
+ 
+-        let (mut lp, vars) = Self::build(problem);
+-        if !time_limit.is_zero() {
+-            lp.set_time_limit(time_limit);
+-        }
+-
+         let started = Instant::now();
+-        let outcome = lp.solve();
++        let stopped =
++            || should_stop() || (!time_limit.is_zero() && started.elapsed() >= time_limit);
++        let Some((mut lp, vars)) = Self::build(problem, &stopped) else {
++            return limited();
++        };
++        let slice = || {
++            let quantum = Duration::from_millis(50);
++            if time_limit.is_zero() {
++                quantum
++            } else {
++                quantum.min(time_limit.saturating_sub(started.elapsed()))
++            }
++        };
++        if stopped() {
++            return limited();
++        }
++        lp.set_time_limit(slice());
++        let mut outcome = lp.solve();
++        // Resume the same simplex state instead of restarting the model. A single
++        // pivot remains indivisible, but no full multi-second solve hides stop.
++        loop {
++            if stopped() {
++                return limited();
++            }
++            outcome = match outcome {
++                Ok(interrupted @ SolveOutcome::Interrupted(_)) => {
++                    let mut options = microlp::ResumeOptions::default();
++                    options.time_limit = Some(slice());
++                    interrupted.resume_with(options)
++                }
++                done => {
++                    outcome = done;
++                    break;
++                }
++            };
++        }
+         let elapsed = started.elapsed();
+ 
+         match outcome {
+@@ -194,29 +233,6 @@
+                 let mut x: Vec<f64> = sol.iter().map(|(_, v)| v).collect();
+                 x.truncate(vars.len());
+                 let objective = sol.objective();
+-                // 예산을 넘겨 돌아왔더라도 **해는 버리지 않는다.**
+-                //
+-                // microlp 0.6 의 순수 LP 경로에서 `SolveOutcome::Solution` 은
+-                // **언제나 증명된 최적해**다 — 데드라인에 걸리면 값 없이
+-                // `Interrupted` 로 온다(`from_lp_stop` 이 `StopReason::Finished` 만
+-                // `Solution` 으로 만든다). 따라서 "늦게 왔다" 를 이유로 `Limit` 로
+-                // 내리면 걸러 내는 것이 **틀렸을지 모르는 해가 아니라 정답**이다.
+-                //
+-                // `Limit` 는 `is_usable()` 이 거절하므로, 예산이 짧을수록(수십 ms)
+-                // 정답을 손에 쥐고도 압축 스텝을 통째로 건너뛰는 일이 반복된다.
+-                // 실측(wsjk156, 압축 1회): 기본 5초 예산에서 폭 7581.3115,
+-                // 제한을 풀면 7581.3110 — 0.0005mm 를 잃고 있었다.
+-                //
+-                // 게다가 압축은 LP 해를 그대로 믿지 않는다. 적용한 뒤 **CDE 로 전수
+-                // 검증**하고 실패하면 스텝을 절반씩 줄여 재시도한다. 틀린 해가
+-                // 통과할 길이 애초에 없다.
+-                //
+-                // 시간 강제는 `set_time_limit` 에 맡긴다. 여기서는 넘긴 사실만 남긴다.
+-                if over_budget(elapsed, time_limit) {
+-                    log::debug!(
+-                        "[LP] {NAME}: 예산 {time_limit:?} 를 {elapsed:?} 로 넘겼지만                          증명된 최적해라 채택한다"
+-                    );
+-                }
+                 LpSolution {
+                     status: LpStatus::Optimal,
+                     x,
+@@ -255,6 +271,7 @@
+ }
+ 
+ /// 예산을 넘겼는가. 예산이 0이면 제한을 걸지 않은 것이므로 언제나 `false`.
++#[cfg(test)]
+ fn over_budget(elapsed: Duration, limit: Duration) -> bool {
+     !limit.is_zero() && elapsed > limit
+ }
+@@ -404,10 +421,7 @@
+         p.objective = vec![1.0, 0.0];
+         p.rows = vec![LpRow::greater_or_equal(vec![0, 0], vec![1.0, 1.0], 2.0)];
+ 
+-        assert!(
+-            p.validate().is_err(),
+-            "중복 열은 계약 층에서 걸러야 한다"
+-        );
++        assert!(p.validate().is_err(), "중복 열은 계약 층에서 걸러야 한다");
+         // 그래도 panic 하지 않고 Failed 로 돌아온다.
+         assert_eq!(MicrolpBackend.solve(&p, budget()).status, LpStatus::Failed);
+     }
+@@ -491,24 +505,9 @@
+         assert!((sol.objective - 2.0).abs() < 1.0e-6, "1차항만 최소화한다");
+     }
+ 
+-    /// 예산을 넘겨 **해가 돌아온 경우** 그 해를 버리지 않는다.
+-    ///
+-    /// # 왜 타이밍으로 테스트하지 않는가
+-    ///
+-    /// 제한을 아주 짧게(1ns) 주면 microlp 는 첫 피벗 전에 멈춰 **값 없이**
+-    /// `Interrupted` 로 돌아온다 — 그건 `Limit` 가 맞고, 이 수정과 무관한 경로다.
+-    /// 이 수정이 다루는 것은 "솔버가 **끝까지 풀어 해를 냈는데** 벽시계가 예산을
+-    /// 넘긴" 경우인데, 그러려면 실제로 수십 ms 이상 걸리는 모델이 필요하다.
+-    /// 작은 LP 로는 그 상태를 결정론적으로 만들 수 없다.
+-    ///
+-    /// 그래서 여기서는 **두 성질만** 고정한다.
+-    /// 1. 넉넉한 예산에서 정상 해가 `Optimal` 이다.
+-    /// 2. 예산이 0(=제한 없음)이면 `over_budget` 이 절대 참이 아니다.
+-    ///
+-    /// 실제 효과는 통합 실측으로 확인했다 — wsjk156 압축 1회에서 기본 5초 예산의
+-    /// 폭이 7581.3115 에서 7581.3110(제한을 푼 값)으로 돌아왔다.
+-    #[test]
+-    fn a_solution_that_comes_back_is_never_downgraded_for_being_late() {
++    /// Unlimited/ample budgets retain optimal solutions; expired budgets return no candidate.
++    #[test]
++    fn budgets_distinguish_optimal_results_from_expired_attempts() {
+         let problem = tiny_lp();
+ 
+         // 1) 넉넉한 예산 — 정상 해.
+@@ -521,13 +520,12 @@
+         assert_eq!(unlimited.status, LpStatus::Optimal);
+         assert!(!over_budget(Duration::from_secs(3600), Duration::ZERO));
+ 
+-        // 3) 아주 짧은 예산에서 `Limit` 가 나온다면 그건 **해가 없는** 경우여야 한다.
+-        //    (`Interrupted` 경로. 해를 들고 Limit 로 내리는 길은 이제 없다.)
++        // A deadline may expire during assembly or solving. Neither commits a candidate.
+         let tight = MicrolpBackend.solve(&problem, Duration::from_nanos(1));
+         if tight.status == LpStatus::Limit {
+             assert!(
+                 tight.x.is_empty(),
+-                "해를 들고 Limit 로 내려왔다 — 정답을 버리고 있다"
++                "expired attempts must not expose a candidate"
+             );
+         }
+     }
+@@ -544,4 +542,19 @@
+             Duration::from_millis(2)
+         ));
+     }
++    #[test]
++    fn cancellation_during_model_assembly_returns_no_candidate() {
++        let count = std::cell::Cell::new(0usize);
++        let mut problem = tiny_lp();
++        problem
++            .rows
++            .extend((0..100).map(|_| LpRow::greater_or_equal(vec![0], vec![1.0], 0.0)));
++        let sol = MicrolpBackend.solve_with_control(&problem, Duration::ZERO, &|| {
++            count.set(count.get() + 1);
++            count.get() >= 8
++        });
++        assert_eq!(sol.status, LpStatus::Limit);
++        assert!(sol.x.is_empty());
++        assert_eq!(count.get(), 8);
++    }
+ }
+--- a/swarm-core/src/lp_solver/mod.rs
++++ b/swarm-core/src/lp_solver/mod.rs
+@@ -348,6 +348,24 @@
+ 
+     /// 푼다. 어떤 입력에도 panic 하지 않아야 한다.
+     fn solve(&self, problem: &LpProblem, time_limit: Duration) -> LpSolution;
++
++    /// Backends with resumable solves override this to poll between solver slices.
++    fn solve_with_control(
++        &self,
++        problem: &LpProblem,
++        time_limit: Duration,
++        should_stop: &dyn Fn() -> bool,
++    ) -> LpSolution {
++        if should_stop() {
++            return LpSolution {
++                status: LpStatus::Limit,
++                x: Vec::new(),
++                objective: f64::NAN,
++                solved_by: self.name(),
++            };
++        }
++        self.solve(problem, time_limit)
++    }
+ }
+ 
+ /// 설정이 가리키는 백엔드를 만든다.
+--- a/swarm-core/src/nfp_lbf/cache.rs
++++ b/swarm-core/src/nfp_lbf/cache.rs
+@@ -247,10 +247,7 @@
+ }
+ 
+ /// 오목 정점 `i` 제거가 단순 다각형을 유지하는지 검사한다.
+-fn concave_removal_is_valid(
+-    points: &[jagua_rs::geometry::primitives::Point],
+-    i: usize,
+-) -> bool {
++fn concave_removal_is_valid(points: &[jagua_rs::geometry::primitives::Point], i: usize) -> bool {
+     let n = points.len();
+     let prev_idx = (i + n - 1) % n;
+     let next_idx = (i + 1) % n;
+@@ -729,9 +726,7 @@
+                 }
+                 acc = Some(match acc {
+                     None => (v.x, v.y, v.x, v.y),
+-                    Some((lx, ly, hx, hy)) => {
+-                        (lx.min(v.x), ly.min(v.y), hx.max(v.x), hy.max(v.y))
+-                    }
++                    Some((lx, ly, hx, hy)) => (lx.min(v.x), ly.min(v.y), hx.max(v.x), hy.max(v.y)),
+                 });
+             }
+         }
+@@ -1140,7 +1135,7 @@
+ ///
+ /// 저장 단위는 `Arc<PolygonSet>`이므로 조회 시 복제 비용이 없다.
+ pub struct NfpLbfCache {
+-    library: PreparedLibrary,
++    library: Arc<PreparedLibrary>,
+     engine: NfpEngine,
+     /// 정규 키 → pair NFP
+     nfp: HashMap<NfpKey, Arc<PolygonSet>>,
+@@ -1184,7 +1179,7 @@
+     /// 라이브러리를 소유하는 빈 캐시를 만든다.
+     pub fn new(library: PreparedLibrary) -> Self {
+         Self {
+-            library,
++            library: Arc::new(library),
+             engine: NfpEngine::new(),
+             nfp: HashMap::new(),
+             nfp_mask: HashMap::new(),
+@@ -1221,11 +1216,7 @@
+     /// 복제되는 것은 `HashMap` 의 뼈대와 `Arc` 포인터뿐이다. 여성WSjk 156-패널에서
+     /// 5,565 pair 라 사본 하나가 수백 KB 수준이고, 16개를 만들어도 몇 MB다.
+     ///
+-    /// `PreparedLibrary` 만 값으로 들고 있어 복제 비용이 실제로 든다. 이건
+-    /// 준비된 형상(삼각분할 포함)이라 무겁다 — 그래서 **읽기 전용 참조로 공유**하지
+-    /// 않고 굳이 복제하는 이유를 밝혀 둔다: `SequentialPlacer` 가 캐시를 `&mut` 로
+-    /// 빌리는 구조라 라이브러리만 따로 빌려 줄 수 없다. 라이브러리를 `Arc` 로 바꾸는
+-    /// 것이 더 낫지만 그건 이 타입의 공개 API 를 건드리는 변경이라 별도로 다룬다.
++    /// PreparedLibrary and prepared geometry are immutable Arc values shared by forks.
+     ///
+     /// # 사본이 안전한 이유
+     ///
+@@ -1848,12 +1839,8 @@
+     #[test]
+     fn geometry_hash_separates_different_shapes() {
+         let square_hash = GeometryHash::of_polygon(&square(0.0, 0.0));
+-        let triangle = SPolygon::new(vec![
+-            Point(0.0, 0.0),
+-            Point(10.0, 0.0),
+-            Point(0.0, 4.0),
+-        ])
+-        .expect("valid triangle");
++        let triangle = SPolygon::new(vec![Point(0.0, 0.0), Point(10.0, 0.0), Point(0.0, 4.0)])
++            .expect("valid triangle");
+         assert_ne!(square_hash, GeometryHash::of_polygon(&triangle));
+ 
+         // 크기가 다르면 다른 등가 클래스다.
+--- a/swarm-core/src/nfp_lbf/exploration.rs
++++ b/swarm-core/src/nfp_lbf/exploration.rs
+@@ -147,7 +147,7 @@
+ /// 목록은 절대 비지 않는다 — 하나도 만들지 못하면 진입 시점의 `sep.prob.save()`를 넣는다.
+ ///
+ /// 이 단계는 `sep`이 들고 있던 배치를 **대체**한다. 마지막에
+-/// [`Separator::change_strip_width`] + [`Separator::rollback`]으로 최선 해를 실어
++/// [`Separator::rollback`]으로 컨테이너와 최선 배치를 함께 복원해
+ /// 다음 단계(compression)가 그대로 이어받게 한다.
+ ///
+ /// # 주의
+@@ -164,6 +164,28 @@
+     expl_config: &ExplorationConfig,
+     nfp_cfg: &NfpLbfSeedConfig,
+ ) -> Vec<SPSolution> {
++    // Sequence reconstruction does not model fixed obstacles or rigid units.
++    // Keep optimizing through the constraint-aware separator instead of dropping
++    // those contracts when installing an otherwise collision-free new layout.
++    if sep.has_place_groups() || sep.frozen_mask.iter().any(|&frozen| frozen) {
++        info!("[NFP-EXPL] fixed items/rigid groups: using constraint-aware exploration");
++        #[cfg(feature = "adaptive")]
++        return crate::optimizer::explore_mods::exploration_phase_adaptive(
++            instance,
++            sep,
++            sol_listener,
++            term,
++            expl_config,
++        );
++        #[cfg(not(feature = "adaptive"))]
++        return crate::optimizer::explore::exploration_phase(
++            instance,
++            sep,
++            sol_listener,
++            term,
++            expl_config,
++        );
++    }
+     let started = Instant::now();
+     let deadline = started + expl_config.time_limit;
+ 
+@@ -458,9 +480,6 @@
+     // 이 단계는 `sep`이 들고 있던 배치를 대체한다. 폭을 먼저 맞추지 않으면
+     // `rollback`의 debug_assert(폭 일치)에 걸린다.
+     if let Some(best) = out.last() {
+-        if sep.prob.strip_width() != best.strip_width() {
+-            sep.change_strip_width(best.strip_width(), None);
+-        }
+         sep.rollback(best, None);
+     }
+ 
+@@ -525,7 +544,11 @@
+     ///
+     /// LP 압축은 **검증을 통과한 해에만** 적용하고, 압축 결과도 다시 검증한다.
+     /// 압축이 실패하거나 폭이 줄지 않으면 압축 이전 해를 그대로 쓴다.
+-    fn finalize(&mut self, placement: &SequentialPlacement, deadline: Instant) -> Option<SPSolution> {
++    fn finalize(
++        &mut self,
++        placement: &SequentialPlacement,
++        deadline: Instant,
++    ) -> Option<SPSolution> {
+         let base = self.materialize(placement)?;
+         if let Some(err) =
+             crate::structure::pipeline::solution_validation_error(self.instance, &base)
+@@ -581,7 +604,10 @@
+ 
+         for piece in placement.pieces.iter() {
+             let Some(left) = self.remaining.get_mut(piece.item_id) else {
+-                warn!("[NFP-EXPL] unknown item id {}; piece skipped", piece.item_id);
++                warn!(
++                    "[NFP-EXPL] unknown item id {}; piece skipped",
++                    piece.item_id
++                );
+                 continue;
+             };
+             if *left == 0 {
+--- a/swarm-core/src/optimizer/compress.rs
++++ b/swarm-core/src/optimizer/compress.rs
+@@ -86,7 +86,6 @@
+     sol_listener: &mut Option<&mut dyn SolutionListener>,
+ ) -> Option<SPSolution> {
+     // Restore to the initial solution and width
+-    sep.change_strip_width(init_sol.strip_width(), None);
+     sep.rollback(init_sol, None);
+ 
+     // Shrink the container by the provided amount at a random position
+@@ -102,7 +101,9 @@
+         return None;
+     }
+     let split_pos = sep.rng.random_range(0.0..sep.prob.strip_width());
+-    sep.change_strip_width(new_width, Some(split_pos));
++    if !sep.change_strip_width_with_control(new_width, Some(split_pos), &mut || term.kill()) {
++        return None;
++    }
+ 
+     // Try to separate layout, if all collisions are eliminated, return the solution
+     let (compacted_sol, ot) = sep.separate(term, sol_listener);
+--- a/swarm-core/src/optimizer/explore.rs
++++ b/swarm-core/src/optimizer/explore.rs
+@@ -7,6 +7,7 @@
+ use float_cmp::approx_eq;
+ use itertools::Itertools;
+ use jagua_rs::collision_detection::hazards::HazardEntity;
++use jagua_rs::collision_detection::hazards::collector::BasicHazardCollector;
+ use jagua_rs::entities::{Instance, Layout, PItemKey};
+ use jagua_rs::geometry::geo_traits::CollidesWith;
+ use jagua_rs::probs::spp::entities::{SPInstance, SPSolution};
+@@ -14,7 +15,6 @@
+ use ordered_float::OrderedFloat;
+ use rand::prelude::{Distribution, IteratorRandom};
+ use rand_distr::Normal;
+-use jagua_rs::collision_detection::hazards::collector::BasicHazardCollector;
+ use std::cmp::Reverse;
+ 
+ /// I-12: infeasible 해 풀 상한. adaptive 경로(explore_mods)의 값과 동일하게 유지한다.
+@@ -28,6 +28,7 @@
+     term: &impl Terminator,
+     config: &ExplorationConfig,
+ ) -> Vec<SPSolution> {
++    let _run_scope = crate::config::runtime::enter_if_unset(sep.run_control.clone());
+     let mut current_width = sep.prob.strip_width();
+     let mut best_width = current_width;
+ 
+--- a/swarm-core/src/optimizer/explore_mods.rs
++++ b/swarm-core/src/optimizer/explore_mods.rs
+@@ -599,6 +599,7 @@
+     term: &impl Terminator,
+     config: &ExplorationConfig,
+ ) -> Vec<SPSolution> {
++    let _run_scope = crate::config::runtime::enter_if_unset(sep.run_control.clone());
+     // infeasible 솔루션 풀 크기 상한. 원본은 무제한이라 실패가 누적되면 해 스냅샷이
+     // 계속 쌓여 메모리를 잠식한다. 선택은 어차피 좋은 해에 쏠리므로 상위만 유지한다.
+     const MAX_INFEAS_POOL_SIZE: usize = 32;
+@@ -810,14 +811,8 @@
+                 let stuck_width = current_width;
+                 // 실패 분기 진입 시 방금 채웠으므로 풀은 비어 있을 수 없다.
+                 let start_sol = infeas_sol_pool[0].0.clone();
+-                match width_relief_escape(
+-                    sep,
+-                    sol_listener,
+-                    term,
+-                    config,
+-                    &start_sol,
+-                    stuck_width,
+-                ) {
++                match width_relief_escape(sep, sol_listener, term, config, &start_sol, stuck_width)
++                {
+                     Some(outcome) if outcome.resolved => {
+                         info!(
+                             "[adaptive] width relief: {:.3} -> {:.3} (+{:.3}%) resolved in {} round(s)",
+@@ -844,13 +839,13 @@
+                         // 폭과 해는 복구 함수가 이미 되돌렸다. 풀은 그대로 두고 아래
+                         // disruption 경로로 계속한다. 정체 신호는 selector/shrink
+                         // feedback을 위해 보존하고, 복구 재시도 지점만 미룬다.
+-                        next_relief_attempt = n_fails_at_width
+-                            .saturating_add(config.relief_fail_threshold.max(1));
++                        next_relief_attempt =
++                            n_fails_at_width.saturating_add(config.relief_fail_threshold.max(1));
+                     }
+                     None => {
+                         // 설정이 비정상이어도 같은 호출을 매 실패마다 반복하지 않는다.
+-                        next_relief_attempt = n_fails_at_width
+-                            .saturating_add(config.relief_fail_threshold.max(1));
++                        next_relief_attempt =
++                            n_fails_at_width.saturating_add(config.relief_fail_threshold.max(1));
+                     }
+                 }
+             } else if !relief_enabled
+@@ -917,9 +912,9 @@
+                     && config.rnr.max_items > 0
+                     && sep.prob.layout.placed_items.len() >= 4
+                     && movable_items >= 2,
+-                gap_target_available: term.timeout_at().is_none_or(|deadline| {
+-                    deadline > Instant::now() + GAP_TARGET_MIN_REMAINING
+-                }),
++                gap_target_available: term
++                    .timeout_at()
++                    .is_none_or(|deadline| deadline > Instant::now() + GAP_TARGET_MIN_REMAINING),
+                 // AdaptiveOps applies the configured cadence centrally.
+                 rnr_due: false,
+             };
+@@ -1148,7 +1143,10 @@
+         // strike 한도는 복구 전으로 복원된다.
+         assert_eq!(
+             sep.config.strike_limit,
+-            DEFAULT_SWARM_CONFIG.expl_cfg.separator_config.strike_limit
++            DEFAULT_SWARM_CONFIG
++                .expl_cfg
++                .separator_config
++                .strike_limit
+         );
+     }
+ 
+@@ -1179,7 +1177,10 @@
+         assert!(tracker_matches_layout(&sep.ct, &sep.prob.layout));
+         assert_eq!(
+             sep.config.strike_limit,
+-            DEFAULT_SWARM_CONFIG.expl_cfg.separator_config.strike_limit
++            DEFAULT_SWARM_CONFIG
++                .expl_cfg
++                .separator_config
++                .strike_limit
+         );
+     }
+ 
+@@ -1485,7 +1486,8 @@
+     #[test]
+     fn density_slack_spans_the_full_max_mult_range_from_its_own_start() {
+         let (gain, max_mult, start) = (1.0f32, 5.0f32, 0.60f32);
+-        let at = |d: f32| density_step_mult(ShrinkAdaptMode::DensitySlack, d, start, gain, max_mult);
++        let at =
++            |d: f32| density_step_mult(ShrinkAdaptMode::DensitySlack, d, start, gain, max_mult);
+ 
+         // 출발 시점에는 max_mult, 이론 한계(밀도 1.0)에서는 1.0.
+         assert!((at(start) - max_mult).abs() < 1.0e-5);
+--- a/swarm-core/src/optimizer/lns.rs
++++ b/swarm-core/src/optimizer/lns.rs
+@@ -50,6 +50,8 @@
+ use ordered_float::OrderedFloat;
+ use rand::prelude::{IndexedRandom, IteratorRandom, SliceRandom};
+ use rand::rngs::Xoshiro256PlusPlus;
++use rand::{RngExt, SeedableRng};
++use rayon::prelude::*;
+ use std::time::Duration;
+ 
+ // ── 내부 구현 상수 (튜닝 축은 config로 노출되어 있다: RuinRecreateConfig / SeparatorConfig) ──
+@@ -338,87 +340,95 @@
+         state.refresh(sep);
+     }
+ 
+-    let mut cands: Vec<Candidate> = Vec::with_capacity(removed.len());
++    // All regret queries see the same layout with the victims removed. Reserve
++    // deterministic per-item RNG streams before dispatch; worker scheduling never
++    // changes the samples. Cache preparation remains local to the NFP owner.
++    let mut jobs = Vec::with_capacity(removed.len());
+     for placement in removed {
+         if term.kill() {
+-            rollback_legacy_rnr(
+-                sep,
+-                &before_solution,
+-                &before_tracker,
+-                &before_rng,
+-                tabu,
+-                &before_tabu,
+-            );
+-            return 0;
++            break;
+         }
+         let item = sep.instance.item(placement.item_id);
+-        // ── NFP 경로 ───────────────────────────────────────────────────
+-        // 최선/차선 모두 이미 CDE로 검증된 자리다. `nfp_state`가 `None`이면
+-        // 이 줄은 빈 Vec 하나를 만들 뿐이고 아래 기존 경로가 그대로 돈다.
+         let nfp_best = match nfp_state.as_mut() {
+             Some(state) => state.best_placements(&sep.prob.layout, item, 2, term),
+             None => Vec::new(),
+         };
+-        let (best_dt, regret) = if !nfp_best.is_empty() {
+-            // regret 은 두 자리의 가중합 점수 차이로 잰다. 기존 경로의 mm loss 차이와
+-            // **척도가 다르므로 그대로 섞어 정렬하면 안 된다** — 아래에서 경로별로
+-            // 정규화한 뒤 비교한다(`Candidate::from_nfp` 문서 참조).
+-            match (nfp_best.first(), nfp_best.get(1)) {
+-                (Some((dt, s1)), Some((_, s2))) => (Some(*dt), s2 - s1),
+-                (Some((dt, _)), None) => (Some(*dt), f32::INFINITY),
+-                _ => (None, f32::NEG_INFINITY),
++        // An NFP-only evaluation still consumes no random numbers.
++        let seed = if nfp_best.is_empty() {
++            sep.rng.random::<u64>()
++        } else {
++            0
++        };
++        jobs.push((placement, nfp_best, seed));
++    }
++    let layout = &sep.prob.layout;
++    let instance = &sep.instance;
++    let evaluate =
++        |(placement, nfp_best, seed): (SPPlacement, Vec<(DTransformation, f32)>, u64)| {
++            if term.kill() {
++                return None;
+             }
+-        } else {
+-            // ── 기존 샘플링 경로 ───────────────────────────────────────
+-            // 플래그가 꺼져 있을 때는 물론, NFP가 후보를 하나도 못 낸 경우에도
+-            // 여기로 온다. NFP는 **접촉 위치만** 열거하므로, 남은 틈이 접촉
+-            // 배치가 불가능할 만큼 얇은 포화 배치에서는 후보가 0개일 수 있다.
+-            // 그때까지 NFP를 고집하면 기존보다 나빠지므로 샘플러로 되돌아간다.
+-            let evaluator = TerminableEvaluator::new(
+-                LBFEvaluator::new(&sep.prob.layout, item, RECREATE_X_MULT, RECREATE_Y_MULT),
+-                term,
+-            );
+-            let mut should_stop = || term.kill();
+-            let (best, second, _) = search_placement_top2_with_control(
+-                &sep.prob.layout,
+-                item,
+-                None,
+-                evaluator,
+-                RECREATE_SAMPLE_CONFIG,
+-                &mut sep.rng,
+-                &mut should_stop,
+-            );
+-            match (best, second) {
+-                (
+-                    Some((dt, SampleEval::Clear { loss: l1 })),
+-                    Some(SampleEval::Clear { loss: l2 }),
+-                ) => (Some(dt), l2 - l1),
+-                // 충돌 없는 자리가 하나뿐 → 경합에서 절대 밀리면 안 된다
+-                (Some((dt, SampleEval::Clear { .. })), _) => (Some(dt), f32::INFINITY),
+-                // 충돌 없는 자리가 없다 → 마지막에 원위치로 폴백
+-                _ => (None, f32::NEG_INFINITY),
+-            }
++            let item = instance.item(placement.item_id);
++            let mut rng = rand::rngs::Xoshiro256PlusPlus::seed_from_u64(seed);
++            let (best_dt, regret) = if !nfp_best.is_empty() {
++                // regret 은 두 자리의 가중합 점수 차이로 잰다. 기존 경로의 mm loss 차이와
++                // **척도가 다르므로 그대로 섞어 정렬하면 안 된다** — 아래에서 경로별로
++                // 정규화한 뒤 비교한다(`Candidate::from_nfp` 문서 참조).
++                match (nfp_best.first(), nfp_best.get(1)) {
++                    (Some((dt, s1)), Some((_, s2))) => (Some(*dt), s2 - s1),
++                    (Some((dt, _)), None) => (Some(*dt), f32::INFINITY),
++                    _ => (None, f32::NEG_INFINITY),
++                }
++            } else {
++                // ── 기존 샘플링 경로 ───────────────────────────────────────
++                // 플래그가 꺼져 있을 때는 물론, NFP가 후보를 하나도 못 낸 경우에도
++                // 여기로 온다. NFP는 **접촉 위치만** 열거하므로, 남은 틈이 접촉
++                // 배치가 불가능할 만큼 얇은 포화 배치에서는 후보가 0개일 수 있다.
++                // 그때까지 NFP를 고집하면 기존보다 나빠지므로 샘플러로 되돌아간다.
++                let evaluator = TerminableEvaluator::new(
++                    LBFEvaluator::new(layout, item, RECREATE_X_MULT, RECREATE_Y_MULT),
++                    term,
++                );
++                let mut should_stop = || term.kill();
++                let (best, second, _) = search_placement_top2_with_control(
++                    layout,
++                    item,
++                    None,
++                    evaluator,
++                    RECREATE_SAMPLE_CONFIG,
++                    &mut rng,
++                    &mut should_stop,
++                );
++                match (best, second) {
++                    (
++                        Some((dt, SampleEval::Clear { loss: l1 })),
++                        Some(SampleEval::Clear { loss: l2 }),
++                    ) => (Some(dt), l2 - l1),
++                    // 충돌 없는 자리가 하나뿐 → 경합에서 절대 밀리면 안 된다
++                    (Some((dt, SampleEval::Clear { .. })), _) => (Some(dt), f32::INFINITY),
++                    // 충돌 없는 자리가 없다 → 마지막에 원위치로 폴백
++                    _ => (None, f32::NEG_INFINITY),
++                }
++            };
++            (!term.kill()).then_some(Candidate {
++                best_dt,
++                regret,
++                area: item.shape_cd.area,
++                placement,
++                from_nfp: !nfp_best.is_empty(),
++            })
+         };
+-        if term.kill() {
+-            rollback_legacy_rnr(
+-                sep,
+-                &before_solution,
+-                &before_tracker,
+-                &before_rng,
+-                tabu,
+-                &before_tabu,
+-            );
+-            return 0;
+-        }
+-        cands.push(Candidate {
+-            best_dt,
+-            regret,
+-            area: item.shape_cd.area,
+-            placement,
+-            from_nfp: !nfp_best.is_empty(),
+-        });
+-    }
+-    if term.kill() {
++    let mut cands: Vec<Candidate> = if jobs.len() >= 4 && sep.workers.len() > 1 {
++        let run = || jobs.into_par_iter().map(evaluate).collect::<Vec<_>>();
++        let results = match sep.thread_pool.as_ref() {
++            Some(pool) => pool.install(run),
++            None => run(),
++        };
++        results.into_iter().flatten().collect()
++    } else {
++        jobs.into_iter().filter_map(evaluate).collect()
++    };
++    if term.kill() || cands.len() != n_ruined {
+         rollback_legacy_rnr(
+             sep,
+             &before_solution,
+@@ -451,7 +461,11 @@
+     let (nfp_scale, sample_scale) = (scale_of(true), scale_of(false));
+     for cand in cands.iter_mut() {
+         if cand.regret.is_finite() {
+-            cand.regret /= if cand.from_nfp { nfp_scale } else { sample_scale };
++            cand.regret /= if cand.from_nfp {
++                nfp_scale
++            } else {
++                sample_scale
++            };
+         }
+     }
+ 
+@@ -720,7 +734,9 @@
+             return None;
+         }
+         let Some(rotations) = instance_rotation_degrees(instance) else {
+-            debug!("[LNS-NFP] 인스턴스 회전을 NFP 라이브러리로 표현할 수 없어 재삽입을 켜지 않는다");
++            debug!(
++                "[LNS-NFP] 인스턴스 회전을 NFP 라이브러리로 표현할 수 없어 재삽입을 켜지 않는다"
++            );
+             return None;
+         };
+         Self::new(
+@@ -906,7 +922,9 @@
+ 
+             // 문서가 정한 세 출처(NFP 정점 / NFP edge 교점 / IFP 교점)에서
+             // feasible 후보를 그대로 받아 온다.
+-            let candidates = self.placer.candidates_for(item.id, degrees, &self.obstacles);
++            let candidates = self
++                .placer
++                .candidates_for(item.id, degrees, &self.obstacles);
+             for candidate in candidates {
+                 let (tx, ty) = (
+                     candidate.translation.0 as f64,
+@@ -1015,8 +1033,7 @@
+         return None;
+     }
+     let rounded = degrees.round();
+-    ((degrees - rounded).abs() <= NFP_ROTATION_DEG_EPS)
+-        .then(|| (rounded as i64).rem_euclid(360))
++    ((degrees - rounded).abs() <= NFP_ROTATION_DEG_EPS).then(|| (rounded as i64).rem_euclid(360))
+ }
+ 
+ /// 도 → 라디안. `[0, 2π)`로 정규화한다.
+@@ -1691,27 +1708,24 @@
+     };
+ 
+     let mut should_stop = || term.kill();
+-    let gaps = match analyze_layout_gaps_with_control(
+-        &sep.prob.layout,
+-        diagnostics_cfg,
+-        &mut should_stop,
+-    ) {
+-        Ok(Some(gaps)) => gaps,
+-        Ok(None) => return None,
+-        Err(_) => {
+-            debug!("[LNS] gap-target diagnostics unavailable; preferring rightmost band");
+-            return Some(
+-                candidates
+-                    .iter()
+-                    .map(|x0| {
+-                        ((*x0 - container.x_min)
+-                            / container.width().max(f32::EPSILON))
+-                        .clamp(0.0, 1.0)
+-                    })
+-                    .collect(),
+-            );
+-        }
+-    };
++    let gaps =
++        match analyze_layout_gaps_with_control(&sep.prob.layout, diagnostics_cfg, &mut should_stop)
++        {
++            Ok(Some(gaps)) => gaps,
++            Ok(None) => return None,
++            Err(_) => {
++                debug!("[LNS] gap-target diagnostics unavailable; preferring rightmost band");
++                return Some(
++                    candidates
++                        .iter()
++                        .map(|x0| {
++                            ((*x0 - container.x_min) / container.width().max(f32::EPSILON))
++                                .clamp(0.0, 1.0)
++                        })
++                        .collect(),
++                );
++            }
++        };
+ 
+     Some(
+         candidates
+@@ -2120,7 +2134,10 @@
+         );
+ 
+         assert_eq!(legacy_ruined, wrapped_ruined);
+-        assert!(legacy_ruined >= 2, "밴드에서 아무것도 부수지 못하면 비교가 무의미하다");
++        assert!(
++            legacy_ruined >= 2,
++            "밴드에서 아무것도 부수지 못하면 비교가 무의미하다"
++        );
+         assert_same_placements(&legacy.prob.save(), &wrapped.prob.save());
+     }
+ 
+--- a/swarm-core/src/optimizer/mod.rs
++++ b/swarm-core/src/optimizer/mod.rs
+@@ -37,16 +37,36 @@
+     SPSolution,
+     Option<crate::structure::pipeline::StructureRunReport>,
+ ) {
+-    let draft_seed = if initial_solution.is_none() && config.refplace.enabled && config.refplace.column_draft {
+-        match crate::refplace::columns::build_column_draft(&instance, crate::refplace::columns::ColumnDraftConfig { preserve_input_contour: config.simplify_max_deviation_mm.is_some(), ..Default::default() }) {
+-            Ok((solution, report)) => {
+-                info!("[INIT] Column Draft: {} pieces, {} columns, {:.2}%, {} ms, completion {}",
+-                    report.placements.len(), report.columns, report.density * 100.0, report.elapsed_ms, report.budget_exhausted);
+-                Some(solution)
++    let _run_scope =
++        crate::config::runtime::enter_if_unset(crate::config::runtime::current_control());
++    let draft_seed =
++        if initial_solution.is_none() && config.refplace.enabled && config.refplace.column_draft {
++            match crate::refplace::columns::build_column_draft(
++                &instance,
++                crate::refplace::columns::ColumnDraftConfig {
++                    preserve_input_contour: config.simplify_max_deviation_mm.is_some(),
++                    ..Default::default()
++                },
++            ) {
++                Ok((solution, report)) => {
++                    info!(
++                        "[INIT] Column Draft: {} pieces, {} columns, {:.2}%, {} ms, completion {}",
++                        report.placements.len(),
++                        report.columns,
++                        report.density * 100.0,
++                        report.elapsed_ms,
++                        report.budget_exhausted
++                    );
++                    Some(solution)
++                }
++                Err(error) => {
++                    warn!("[INIT] Column Draft failed: {error}; using configured fallback");
++                    None
++                }
+             }
+-            Err(error) => { warn!("[INIT] Column Draft failed: {error}; using configured fallback"); None }
+-        }
+-    } else { None };
++        } else {
++            None
++        };
+     let initial_solution = initial_solution.or(draft_seed.as_ref());
+     #[cfg(feature = "structure-first")]
+     if config.structure.enabled {
+@@ -180,6 +200,8 @@
+     nfp_integration: &crate::config::NfpIntegrationConfig,
+     lp_solver: &crate::lp_solver::LpSolverConfig,
+ ) -> SPSolution {
++    let _run_scope =
++        crate::config::runtime::enter_if_unset(crate::config::runtime::current_control());
+     let mut next_rng = || Xoshiro256PlusPlus::seed_from_u64(rng.next_u64());
+ 
+     // NFP-LBF 시드. 검증을 통과한 해만 warm start로 넘긴다.
+@@ -293,48 +315,47 @@
+             &seed_c,
+         )
+     } else {
+-    match escape_config {
+-        Some(escape_config) => crate::escape::pipeline::escape_driven_exploration_phase_with_nfp(
+-            &instance,
+-            &mut expl_separator,
+-            &mut sol_listener,
+-            terminator,
+-            expl_config,
+-            escape_config,
+-            nfp_integration,
+-        ),
+-        None => {
+-            // 일반 탐색 기능
+-            #[cfg(not(feature = "adaptive"))]
+-            let solutions = exploration_phase(
+-                &instance,
+-                &mut expl_separator,
+-                &mut sol_listener,
+-                terminator,
+-                expl_config,
+-            );
+-
+-            // 적응형 탐색 Adaptive 기능
+-            #[cfg(feature = "adaptive")]
+-            let solutions = crate::optimizer::explore_mods::exploration_phase_adaptive(
+-                &instance,
+-                &mut expl_separator,
+-                &mut sol_listener,
+-                terminator,
+-                expl_config,
+-            );
+-
+-            solutions
++        match escape_config {
++            Some(escape_config) => {
++                crate::escape::pipeline::escape_driven_exploration_phase_with_nfp(
++                    &instance,
++                    &mut expl_separator,
++                    &mut sol_listener,
++                    terminator,
++                    expl_config,
++                    escape_config,
++                    nfp_integration,
++                )
++            }
++            None => {
++                // 일반 탐색 기능
++                #[cfg(not(feature = "adaptive"))]
++                let solutions = exploration_phase(
++                    &instance,
++                    &mut expl_separator,
++                    &mut sol_listener,
++                    terminator,
++                    expl_config,
++                );
++
++                // 적응형 탐색 Adaptive 기능
++                #[cfg(feature = "adaptive")]
++                let solutions = crate::optimizer::explore_mods::exploration_phase_adaptive(
++                    &instance,
++                    &mut expl_separator,
++                    &mut sol_listener,
++                    terminator,
++                    expl_config,
++                );
++
++                solutions
++            }
+         }
+-    }
+     };
+     let expl_candidate = solutions.last().unwrap().clone();
+     let final_explore_sol =
+         retain_exact_no_worse(&instance, &exact_incumbent, expl_candidate, "EXPL");
+     exact_incumbent = final_explore_sol.clone();
+-    if expl_separator.prob.strip_width() != final_explore_sol.strip_width() {
+-        expl_separator.change_strip_width(final_explore_sol.strip_width(), None);
+-    }
+     expl_separator.rollback(&final_explore_sol, None);
+ 
+     // Start the compression phase from the final solution from the exploration phase
+@@ -355,9 +376,6 @@
+     );
+     let cmpr_sol = retain_exact_no_worse(&instance, &exact_incumbent, cmpr_candidate, "CMPR");
+     exact_incumbent = cmpr_sol.clone();
+-    if cmpr_separator.prob.strip_width() != cmpr_sol.strip_width() {
+-        cmpr_separator.change_strip_width(cmpr_sol.strip_width(), None);
+-    }
+     cmpr_separator.rollback(&cmpr_sol, None);
+ 
+     // 압축이 끝난 feasible 해를 결정론적으로 다듬는다 (슬라이딩 / hole filling / LP compaction)
+--- a/swarm-core/src/optimizer/polish/holes.rs
++++ b/swarm-core/src/optimizer/polish/holes.rs
+@@ -5,7 +5,7 @@
+ use crate::nfp_lbf::cache::PLACEMENT_CLEARANCE_MM;
+ use crate::optimizer::separator::Separator;
+ use crate::sample::best_samples::BestSamples;
+-use crate::sample::coord_descent::refine_coord_desc;
++use crate::sample::coord_descent::refine_coord_desc_with_control;
+ use crate::sample::search::{final_refine_cd_config, prerefine_cd_config};
+ use crate::util::terminator::Terminator;
+ use itertools::Itertools;
+@@ -578,15 +578,29 @@
+             continue;
+         }
+         // hole fill은 틸트 없이(0.0) 기존 회전 의미론을 유지한다
+-        let refined = refine_coord_desc(start, &mut evaluator, prerefine_cd_config(item, 0.0), rng);
++        let refined = refine_coord_desc_with_control(
++            start,
++            &mut evaluator,
++            prerefine_cd_config(item, 0.0),
++            rng,
++            &mut || term.kill(),
++        );
+         best.report(refined.0, refined.1);
+     }
+     let (dt, eval) = best
+         .best()
+         .filter(|(_, e)| *e != SampleEval::Invalid)
+-        .map(|s| refine_coord_desc(s, &mut evaluator, final_refine_cd_config(item, 0.0), rng))?;
+-
+-    if !matches!(eval, SampleEval::Clear { .. }) {
++        .map(|s| {
++            refine_coord_desc_with_control(
++                s,
++                &mut evaluator,
++                final_refine_cd_config(item, 0.0),
++                rng,
++                &mut || term.kill(),
++            )
++        })?;
++
++    if term.kill() || !matches!(eval, SampleEval::Clear { .. }) {
+         return None;
+     }
+ 
+@@ -764,8 +778,14 @@
+             return hit.clone();
+         }
+ 
+-        let (qx0, qy0) = (key.0 as f64 / GRID_SCALE as f64, key.1 as f64 / GRID_SCALE as f64);
+-        let (qx1, qy1) = (key.2 as f64 / GRID_SCALE as f64, key.3 as f64 / GRID_SCALE as f64);
++        let (qx0, qy0) = (
++            key.0 as f64 / GRID_SCALE as f64,
++            key.1 as f64 / GRID_SCALE as f64,
++        );
++        let (qx1, qy1) = (
++            key.2 as f64 / GRID_SCALE as f64,
++            key.3 as f64 / GRID_SCALE as f64,
++        );
+         let inset_x = window_inset(qx1 - qx0);
+         let inset_y = window_inset(qy1 - qy0);
+         // 창을 각 변에서 조금 줄여 앵커가 항상 엄격히 안쪽에 오게 한다. 근거는
+@@ -1024,7 +1044,10 @@
+             // 이 회전·이 창에서 가장 왼쪽 유효 자리**다. 뒤 후보는 x가 더 크므로 볼 필요 없다.
+             for (cx, cy) in region_candidates(&cache.engine, &region, sample_cap) {
+                 let dt = DTransformation::new(*r, (cx as f32, cy as f32));
+-                if !matches!(evaluator.evaluate_sample(dt, None), SampleEval::Clear { .. }) {
++                if !matches!(
++                    evaluator.evaluate_sample(dt, None),
++                    SampleEval::Clear { .. }
++                ) {
+                     continue;
+                 }
+                 let new_x_max = placed_bbox(item, dt).x_max;
+--- a/swarm-core/src/optimizer/polish/lp.rs
++++ b/swarm-core/src/optimizer/polish/lp.rs
+@@ -9,6 +9,7 @@
+ use jagua_rs::geometry::primitives::{Point, Rect, SPolygon};
+ use log::{debug, info};
+ use ordered_float::OrderedFloat;
++use rayon::prelude::*;
+ 
+ /// LP에 참여하는 아이템 하나에 대한 정보.
+ ///
+@@ -186,12 +187,7 @@
+     cfg: &LpCompactionConfig,
+     term: &impl Terminator,
+ ) -> usize {
+-    lp_compaction_pass_with_solver(
+-        sep,
+-        cfg,
+-        &crate::lp_solver::DEFAULT_LP_SOLVER_CONFIG,
+-        term,
+-    )
++    lp_compaction_pass_with_solver(sep, cfg, &crate::lp_solver::DEFAULT_LP_SOLVER_CONFIG, term)
+ }
+ 
+ /// [`lp_compaction_pass`]에 솔버 선택을 얹은 진입점.
+@@ -358,8 +354,18 @@
+     if term.kill() {
+         return IterOutcome::Abort;
+     }
+-    let Some(rows) = build_contact_rows(&items, clearance, cfg, term) else {
+-        return IterOutcome::Abort;
++    let build_rows = || build_contact_rows(&items, clearance, cfg, term);
++    let rows = match sep
++        .thread_pool
++        .as_ref()
++        .map_or_else(build_rows, |pool| pool.install(build_rows))
++    {
++        Ok(rows) => rows,
++        Err(ContactBuildError::Cancelled) => return IterOutcome::Abort,
++        Err(ContactBuildError::Limit) => {
++            stats.skipped_rows_cap += 1;
++            return IterOutcome::Intractable;
++        }
+     };
+     stats.rows_max = stats.rows_max.max(rows.len());
+     if rows.len() > cfg.max_constraints {
+@@ -375,7 +381,15 @@
+ 
+     // 3. 모델 — 컨테이너 제약과 접촉 제약을 백엔드 중립 표현으로 담는다.
+     let model = build_generic_model(
+-        &items, &rows, container, w_lower, width_before, trust, pull, cfg, solver,
++        &items,
++        &rows,
++        container,
++        w_lower,
++        width_before,
++        trust,
++        pull,
++        cfg,
++        solver,
+     );
+     debug!(
+         "[LP] model: {} vars, {} rows ({} contact), trust: {:.4}",
+@@ -395,8 +409,8 @@
+         stats.solver_fail += 1;
+         return IterOutcome::Abort;
+     };
+-    // 어떤 백엔드도 푸는 동안에는 Swarm 의 Terminator 를 보지 않는다. 남은 단계/
+-    // 슬라이스 예산을 넘겨 grouped lane 이 quantum 을 넘기지 않게 한다.
++    // Pass the remaining phase/slice budget to every backend. Microlp also
++    // polls cancellation between resumable slices; external backends use their deadline.
+     //
+     // **합치면서 바뀐 유일한 동작이 여기다.** 옛 인라인 경로는 Terminator 데드라인이
+     // 있을 때만 제한을 걸었고, 없으면 단체법을 무제한으로 돌렸다. 이제는 데드라인이
+@@ -424,9 +438,12 @@
+     if limit.is_zero() {
+         return IterOutcome::Abort;
+     }
+-    let sol = backend.solve(&model, limit);
++    let sol = backend.solve_with_control(&model, limit, &|| term.kill());
+     if !sol.status.is_usable() {
+-        debug!("[LP] {} 가 해를 주지 못했다: {:?}", sol.solved_by, sol.status);
++        debug!(
++            "[LP] {} 가 해를 주지 못했다: {:?}",
++            sol.solved_by, sol.status
++        );
+         // 시간 제한과 진짜 실패를 나눠 센다 — 앞쪽은 예산을 늘리면 사라지는 종류다.
+         // 시간 제한과 진짜 실패를 나눠 센다 — 앞쪽은 예산을 늘리면 사라지는 종류다.
+         // 다만 **대응은 같다**: 둘 다 "이 모델을 못 풀었다" 이고, 모델을 줄이면
+@@ -476,7 +493,10 @@
+         if term.kill() {
+             break;
+         }
+-        apply_deltas(sep, &deltas, lambda);
++        if !apply_deltas_with_control(sep, &deltas, lambda, &mut || term.kill()) {
++            sep.rollback(&saved, None);
++            return IterOutcome::Abort;
++        }
+         if sep.ct.get_total_loss() == 0.0 {
+             sep.refit_strip();
+             let after = sep.prob.strip_width();
+@@ -502,56 +522,111 @@
+ }
+ 
+ /// 이동량을 `lambda` 비율로 적용한다.
+-fn apply_deltas(sep: &mut Separator, deltas: &[(PItemKey, (f32, f32))], lambda: f32) {
+-    for &(pk, (dx, dy)) in deltas {
+-        let (dx, dy) = (dx * lambda, dy * lambda);
+-        if dx == 0.0 && dy == 0.0 {
+-            continue;
+-        }
+-        let Some(pi) = sep.prob.layout.placed_items.get(pk) else {
+-            continue;
+-        };
+-        let dt = pi.d_transf;
+-        sep.move_item(pk, translated(dt, (dx, dy), 1.0));
+-    }
+-}
+-
+-/// 서로 `clearance` 이내에 있는 아이템 쌍에 대해 정점-모서리 분리 제약을 만든다.
++fn apply_deltas_with_control(
++    sep: &mut Separator,
++    deltas: &[(PItemKey, (f32, f32))],
++    lambda: f32,
++    should_stop: &mut dyn FnMut() -> bool,
++) -> bool {
++    let moves: Vec<_> = deltas
++        .iter()
++        .filter_map(|&(pk, (dx, dy))| {
++            if dx == 0.0 && dy == 0.0 {
++                return None;
++            }
++            let dt = sep.prob.layout.placed_items.get(pk)?.d_transf;
++            Some((pk, translated(dt, (dx * lambda, dy * lambda), 1.0)))
++        })
++        .collect();
++    sep.move_items_with_control(&moves, should_stop)
++}
++
++#[derive(Debug, PartialEq, Eq)]
++enum ContactBuildError {
++    Cancelled,
++    Limit,
++}
++
++/// Read-only pairs are evaluated in bounded batches. Indexed collection keeps
++/// row order identical across thread counts; only model construction is parallel.
+ fn build_contact_rows(
+     items: &[LpItem],
+     clearance: f32,
+     cfg: &LpCompactionConfig,
+     term: &impl Terminator,
+-) -> Option<Vec<ContactRow>> {
+-    let mut rows = vec![];
+-
+-    // x축 스윕으로 근접 쌍만 추린다.
++) -> Result<Vec<ContactRow>, ContactBuildError> {
+     let order = (0..items.len())
+         .sorted_by_key(|&i| OrderedFloat(items[i].bbox.x_min))
+         .collect_vec();
+-
++    let mut rows = Vec::new();
++    let mut pairs = Vec::with_capacity(64);
+     for (oi, &i) in order.iter().enumerate() {
+         if term.kill() {
+-            return None;
+-        }
+-        for &j in order[oi + 1..].iter() {
++            return Err(ContactBuildError::Cancelled);
++        }
++        for &j in &order[oi + 1..] {
+             if term.kill() {
+-                return None;
++                return Err(ContactBuildError::Cancelled);
+             }
+             if items[j].bbox.x_min > items[i].bbox.x_max + clearance {
+-                break; // 정렬되어 있으므로 이후 아이템은 모두 멀다
+-            }
+-            if items[i].frozen && items[j].frozen {
+-                continue; // 둘 다 고정 → 제약이 무의미
+-            }
+-            if !bboxes_within(items[i].bbox, items[j].bbox, clearance) {
++                break;
++            }
++            if (items[i].frozen && items[j].frozen)
++                || !bboxes_within(items[i].bbox, items[j].bbox, clearance)
++            {
+                 continue;
+             }
+-            collect_pair_rows(items, i, j, clearance, cfg, &mut rows);
+-            collect_pair_rows(items, j, i, clearance, cfg, &mut rows);
+-        }
+-    }
+-    Some(rows)
++            pairs.push((i, j));
++            if pairs.len() == 64 {
++                append_contact_batch(items, &pairs, clearance, cfg, term, &mut rows)?;
++                pairs.clear();
++            }
++        }
++    }
++    append_contact_batch(items, &pairs, clearance, cfg, term, &mut rows)?;
++    Ok(rows)
++}
++
++fn append_contact_batch(
++    items: &[LpItem],
++    pairs: &[(usize, usize)],
++    clearance: f32,
++    cfg: &LpCompactionConfig,
++    term: &impl Terminator,
++    rows: &mut Vec<ContactRow>,
++) -> Result<(), ContactBuildError> {
++    let evaluate = |&(i, j): &(usize, usize)| {
++        let mut local = Vec::new();
++        if !collect_pair_rows_with_control(items, i, j, clearance, cfg, &mut local, term)
++            || !collect_pair_rows_with_control(items, j, i, clearance, cfg, &mut local, term)
++        {
++            return Err(ContactBuildError::Cancelled);
++        }
++        Ok(local)
++    };
++    let work: usize = pairs
++        .iter()
++        .map(|&(i, j)| {
++            items[i]
++                .shape
++                .n_vertices()
++                .saturating_mul(items[j].shape.n_vertices())
++        })
++        .sum();
++    let batch: Vec<Result<Vec<ContactRow>, ContactBuildError>> =
++        if pairs.len() >= 4 && work >= 16_384 && rayon::current_num_threads() > 1 {
++            pairs.par_iter().map(evaluate).collect()
++        } else {
++            pairs.iter().map(evaluate).collect()
++        };
++    for result in batch {
++        let local = result?;
++        if local.len() > cfg.max_constraints.saturating_sub(rows.len()) {
++            return Err(ContactBuildError::Limit);
++        }
++        rows.extend(local);
++    }
++    Ok(())
+ }
+ 
+ fn bboxes_within(a: Rect, b: Rect, clearance: f32) -> bool {
+@@ -715,6 +790,7 @@
+ }
+ 
+ /// 아이템 `a`의 정점들과 아이템 `b`의 모서리들 사이의 근접 쌍에 대해 제약을 만든다.
++#[cfg(test)]
+ fn collect_pair_rows(
+     items: &[LpItem],
+     a: usize,
+@@ -723,6 +799,26 @@
+     cfg: &LpCompactionConfig,
+     out: &mut Vec<ContactRow>,
+ ) {
++    collect_pair_rows_with_control(
++        items,
++        a,
++        b,
++        clearance,
++        cfg,
++        out,
++        &crate::util::terminator::BasicTerminator::new(),
++    );
++}
++
++fn collect_pair_rows_with_control(
++    items: &[LpItem],
++    a: usize,
++    b: usize,
++    clearance: f32,
++    cfg: &LpCompactionConfig,
++    out: &mut Vec<ContactRow>,
++    term: &impl Terminator,
++) -> bool {
+     let (sa, sb) = (&items[a].shape, &items[b].shape);
+     let b_centroid = sb.centroid();
+     let sq_clearance = clearance * clearance;
+@@ -730,6 +826,9 @@
+     let mut candidates: Vec<ContactRow> = vec![];
+ 
+     for vi in 0..sa.n_vertices() {
++        if term.kill() {
++            return false;
++        }
+         let v = sa.vertex(vi);
+         // b의 bbox에서 clearance 밖에 있는 정점은 볼 필요 없다
+         if v.0 < sb.bbox.x_min - clearance
+@@ -739,7 +838,10 @@
+         {
+             continue;
+         }
+-        for e in sb.edge_iter() {
++        for (ei, e) in sb.edge_iter().enumerate() {
++            if ei % 64 == 0 && term.kill() {
++                return false;
++            }
+             if v.0 < e.x_min() - clearance
+                 || v.0 > e.x_max() + clearance
+                 || v.1 < e.y_min() - clearance
+@@ -753,7 +855,24 @@
+             let Some(row) = contact_row(a, b, v, e.start, e.end, b_centroid) else {
+                 continue;
+             };
+-            candidates.push(row);
++            if dedup_enabled() {
++                // Retain only the strongest bounded set of distinct directions.
++                // Equal-distance ties retain vertex/edge traversal order.
++                let key = normal_key(row.n);
++                if let Some(pos) = candidates.iter().position(|r| normal_key(r.n) == key) {
++                    if candidates[pos].dist <= row.dist {
++                        continue;
++                    }
++                    candidates.remove(pos);
++                }
++                let pos = candidates.partition_point(|r| r.dist <= row.dist);
++                if pos < cfg.max_constraints_per_pair {
++                    candidates.insert(pos, row);
++                    candidates.truncate(cfg.max_constraints_per_pair);
++                }
++            } else {
++                candidates.push(row);
++            }
+         }
+     }
+ 
+@@ -761,6 +880,7 @@
+     // (→ 적용 후 CDE 검증이 필수인 이유).
+     candidates.sort_by_key(|r| OrderedFloat(r.dist));
+     out.extend(dedup_by_direction(candidates, cfg.max_constraints_per_pair));
++    true
+ }
+ 
+ /// 정점 `v`가 모서리 (p, q)의 현재 쪽을 유지하도록 하는 제약을 만든다.
+@@ -1175,7 +1295,10 @@
+         let n_movable = s.items.iter().filter(|it| !it.frozen).count();
+         assert_eq!(model.n_vars(), 1 + 2 * n_movable);
+         assert_eq!(model.objective.first().map(|&v| q(v)), Some(q(1.0)));
+-        assert_eq!(model.lower.first().map(|&v| q(v)), Some(q(s.w_lower as f64)));
++        assert_eq!(
++            model.lower.first().map(|&v| q(v)),
++            Some(q(s.w_lower as f64))
++        );
+         assert_eq!(
+             model.upper.first().map(|&v| q(v)),
+             Some(q(s.width_before as f64))
+@@ -1250,7 +1373,11 @@
+             );
+             let mut top = LinearExpr::empty();
+             top.add(dy, 1.0);
+-            lp.add_constraint(top, ComparisonOp::Le, (s.container.y_max - it.bbox.y_max) as f64);
++            lp.add_constraint(
++                top,
++                ComparisonOp::Le,
++                (s.container.y_max - it.bbox.y_max) as f64,
++            );
+         }
+         for row in s.rows.iter() {
+             let mut e = LinearExpr::empty();
+@@ -1386,8 +1513,7 @@
+             ..NfpLbfConfig::default()
+         };
+         let mut seed_rng = Xoshiro256PlusPlus::seed_from_u64(0);
+-        let nest =
+-            build_best_initial_nest(&instance, &nfp_cfg, &mut seed_rng).expect("초기 배치");
++        let nest = build_best_initial_nest(&instance, &nfp_cfg, &mut seed_rng).expect("초기 배치");
+ 
+         let mut prob = SPProblem::new(instance.clone());
+         prob.restore(&nest.solution);
+@@ -1432,7 +1558,10 @@
+             width_after <= width_before + 1.0e-4,
+             "압축이 폭을 늘렸다: {width_before} -> {width_after}"
+         );
+-        assert!(sep.prob.layout.is_feasible(), "압축 후 배치가 유효해야 한다");
++        assert!(
++            sep.prob.layout.is_feasible(),
++            "압축 후 배치가 유효해야 한다"
++        );
+     }
+ 
+     // ── 반복 스케줄 전이 규칙 ────────────────────────────────────────────
+@@ -1500,7 +1629,11 @@
+     fn schedule_shrinks_the_trust_region_when_the_model_cannot_be_solved() {
+         let (seen, _) = run(&[IterOutcome::Intractable; 3]);
+         let levels: Vec<i32> = seen.iter().map(|s| s.level).collect();
+-        assert_eq!(levels, vec![0, -1, -2, -3], "실패마다 한 단계씩 줄어야 한다");
++        assert_eq!(
++            levels,
++            vec![0, -1, -2, -3],
++            "실패마다 한 단계씩 줄어야 한다"
++        );
+         assert!(
+             levels.windows(2).all(|w| w[1] < w[0]),
+             "실패에 신뢰 영역이 커지면 안 된다"
+@@ -1607,7 +1740,11 @@
+         }
+         // 구간 경계값도 직접 확인한다.
+         assert_eq!(contact_rhs(0.0), 0.0);
+-        assert_eq!(contact_rhs(0.05), 0.0, "0.05 이하는 기존 간격 유지만 요구한다");
++        assert_eq!(
++            contact_rhs(0.05),
++            0.0,
++            "0.05 이하는 기존 간격 유지만 요구한다"
++        );
+         assert!(contact_rhs(0.2) < 0.0);
+         assert!(contact_rhs(1.0) < contact_rhs(0.2));
+     }
+@@ -1775,8 +1912,9 @@
+ 
+         let path = match std::env::var("SWARM_INPUT") {
+             Ok(p) => std::path::PathBuf::from(p),
+-            Err(_) => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+-                .join("../data/input/wsjk156.json"),
++            Err(_) => {
++                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/input/wsjk156.json")
++            }
+         };
+         let (ext, _) = crate::util::io::read_spp_input(&path).expect("입력 읽기");
+         let mut c = crate::config::DEFAULT_SWARM_CONFIG;
+@@ -1789,10 +1927,8 @@
+         let instance = jagua_rs::probs::spp::io::import_instance(&imp, &ext).expect("import");
+ 
+         // ── 1. 시작 레이아웃을 **한 번만** 만든다 (polish 는 끈다) ──
+-        c.expl_cfg.time_limit =
+-            Duration::from_secs(env_usize("AB_EXPLORE_SECS", 30) as u64);
+-        c.cmpr_cfg.time_limit =
+-            Duration::from_secs(env_usize("AB_COMPRESS_SECS", 15) as u64);
++        c.expl_cfg.time_limit = Duration::from_secs(env_usize("AB_EXPLORE_SECS", 30) as u64);
++        c.cmpr_cfg.time_limit = Duration::from_secs(env_usize("AB_COMPRESS_SECS", 15) as u64);
+         c.polish_cfg.enabled = false;
+         c.polish_cfg.time_limit = Duration::ZERO;
+         // 결정성을 위해 워커 1개.
+@@ -1875,3 +2011,173 @@
+         );
+     }
+ }
++
++#[cfg(test)]
++mod parallel_regression {
++    use super::*;
++    use crate::util::terminator::BasicTerminator;
++    fn fixture() -> Vec<LpItem> {
++        let mut keys: slotmap::SlotMap<PItemKey, ()> = slotmap::SlotMap::with_key();
++        (0..16)
++            .map(|i| {
++                let vertices = (0..128)
++                    .map(|v| {
++                        let a = v as f32 * std::f32::consts::TAU / 128.0;
++                        Point(
++                            (i % 4) as f32 * 10.2 + 5.0 * a.cos(),
++                            (i / 4) as f32 * 10.2 + 5.0 * a.sin(),
++                        )
++                    })
++                    .collect();
++                let shape = std::sync::Arc::new(SPolygon::new(vertices).unwrap());
++                LpItem {
++                    pk: keys.insert(()),
++                    bbox: shape.bbox,
++                    shape,
++                    frozen: i == 0,
++                }
++            })
++            .collect()
++    }
++    fn signature(rows: &[ContactRow]) -> Vec<(usize, usize, u32, u32, u32)> {
++        rows.iter()
++            .map(|r| (r.a, r.b, r.n.0.to_bits(), r.n.1.to_bits(), r.dist.to_bits()))
++            .collect()
++    }
++    #[test]
++    fn contact_rows_are_identical_across_thread_counts_and_caps_stop_early() {
++        let items = fixture();
++        let cfg = crate::config::DEFAULT_POLISH_CONFIG.lp;
++        let mut reference = None;
++        for workers in [1, 2, 4] {
++            let pool = rayon::ThreadPoolBuilder::new()
++                .num_threads(workers)
++                .build()
++                .unwrap();
++            let rows = pool
++                .install(|| build_contact_rows(&items, 8.0, &cfg, &BasicTerminator::new()))
++                .unwrap();
++            assert!(rows.len() > 100);
++            let current = signature(&rows);
++            if let Some(expected) = &reference {
++                assert_eq!(&current, expected);
++            } else {
++                reference = Some(current);
++            }
++        }
++        let mut capped = cfg;
++        capped.max_constraints = 1;
++        assert!(matches!(
++            build_contact_rows(&items, 8.0, &capped, &BasicTerminator::new()),
++            Err(ContactBuildError::Limit)
++        ));
++    }
++    #[test]
++    fn bounded_direction_selection_matches_full_collect_sort_dedup() {
++        let items = fixture();
++        for cap in [0, 1, 2, 4, 8, 128] {
++            let mut cfg = crate::config::DEFAULT_POLISH_CONFIG.lp;
++            cfg.max_constraints_per_pair = cap;
++            for a in 0..items.len() {
++                for b in 0..items.len() {
++                    if a == b {
++                        continue;
++                    }
++                    let mut expected = Vec::new();
++                    reference_pair_rows(&items, a, b, 12.0, &cfg, &mut expected);
++                    let mut actual = Vec::new();
++                    assert!(collect_pair_rows_with_control(
++                        &items,
++                        a,
++                        b,
++                        12.0,
++                        &cfg,
++                        &mut actual,
++                        &BasicTerminator::new()
++                    ));
++                    assert_eq!(
++                        signature(&actual),
++                        signature(&expected),
++                        "cap={cap}, pair=({a},{b})"
++                    );
++                }
++            }
++        }
++    }
++    #[test]
++    #[ignore = "isolated contact-generation microbenchmark; run without other builds"]
++    fn contact_generation_parallel_benchmark() {
++        let items = fixture();
++        let cfg = crate::config::DEFAULT_POLISH_CONFIG.lp;
++        for workers in [1, 2, 4] {
++            let pool = rayon::ThreadPoolBuilder::new()
++                .num_threads(workers)
++                .build()
++                .unwrap();
++            pool.install(|| build_contact_rows(&items, 8.0, &cfg, &BasicTerminator::new()))
++                .unwrap();
++            let mut samples = Vec::new();
++            let mut n = 0;
++            for _ in 0..9 {
++                let start = std::time::Instant::now();
++                n = pool
++                    .install(|| build_contact_rows(&items, 8.0, &cfg, &BasicTerminator::new()))
++                    .unwrap()
++                    .len();
++                samples.push(start.elapsed().as_secs_f64() * 1000.0);
++            }
++            samples.sort_by(f64::total_cmp);
++            println!(
++                "contacts workers={workers} rows={n} median_ms={:.3}",
++                samples[4]
++            );
++        }
++    }
++    fn reference_pair_rows(
++        items: &[LpItem],
++        a: usize,
++        b: usize,
++        clearance: f32,
++        cfg: &LpCompactionConfig,
++        out: &mut Vec<ContactRow>,
++    ) {
++        let (sa, sb) = (&items[a].shape, &items[b].shape);
++        let b_centroid = sb.centroid();
++        let sq_clearance = clearance * clearance;
++
++        let mut candidates: Vec<ContactRow> = vec![];
++
++        for vi in 0..sa.n_vertices() {
++            let v = sa.vertex(vi);
++            // b의 bbox에서 clearance 밖에 있는 정점은 볼 필요 없다
++            if v.0 < sb.bbox.x_min - clearance
++                || v.0 > sb.bbox.x_max + clearance
++                || v.1 < sb.bbox.y_min - clearance
++                || v.1 > sb.bbox.y_max + clearance
++            {
++                continue;
++            }
++            for e in sb.edge_iter() {
++                if v.0 < e.x_min() - clearance
++                    || v.0 > e.x_max() + clearance
++                    || v.1 < e.y_min() - clearance
++                    || v.1 > e.y_max() + clearance
++                {
++                    continue;
++                }
++                if e.sq_distance_to(&v) > sq_clearance {
++                    continue;
++                }
++                let Some(row) = contact_row(a, b, v, e.start, e.end, b_centroid) else {
++                    continue;
++                };
++                candidates.push(row);
++            }
++        }
++
++        // 가까운 접촉부터 우선. 같은 방향의 중복을 접고 쌍당 상한까지 자른다
++        // (→ 적용 후 CDE 검증이 필수인 이유).
++        candidates.sort_by_key(|r| OrderedFloat(r.dist));
++        out.extend(dedup_by_direction(candidates, cfg.max_constraints_per_pair));
++    }
++}
+--- a/swarm-core/src/optimizer/polish/mod.rs
++++ b/swarm-core/src/optimizer/polish/mod.rs
+@@ -60,8 +60,7 @@
+ pub enum PolishExit {
+     /// 시간(또는 중단 요청)에 걸렸다 — 예산을 다 썼다는 뜻이다.
+     Killed,
+-    /// 어떤 패스도 아무것도 바꾸지 못했다. 패스는 전부 결정론적이므로 이건
+-    /// **진짜 고정점**이다 — 더 돌아도 같은 결과다.
++    /// Configured attempts left the placement poses unchanged; not a proof of optimality.
+     NoChanges,
+     /// 최소 라운드를 채웠고 그 라운드가 폭을 줄이지 못했다.
+     RoundCapWithoutImprovement,
+@@ -91,7 +90,14 @@
+     lp_solver: &crate::lp_solver::LpSolverConfig,
+ ) -> SPSolution {
+     polish_phase_measured(
+-        instance, sep, init_sol, sol_listener, term, config, nfp_cfg, lp_solver,
++        instance,
++        sep,
++        init_sol,
++        sol_listener,
++        term,
++        config,
++        nfp_cfg,
++        lp_solver,
+     )
+     .0
+ }
+@@ -112,46 +118,39 @@
+     lp_solver: &crate::lp_solver::LpSolverConfig,
+ ) -> (SPSolution, PolishStats) {
+     if !config.enabled {
+-        return (init_sol.clone(), PolishStats {
++        return (
++            init_sol.clone(),
++            PolishStats {
+                 rounds: 0,
+                 changes: 0,
+                 exit: PolishExit::NoChanges,
+-            },);
++            },
++        );
+     }
+ 
+     // NFP hole filling 이 켜졌을 때만 캐시를 만든다. polish 라운드가 반복되므로
+     // 준비본(PreparedShape / PreparedRegion)을 라운드마다 새로 만들지 않는다.
+-    let mut nfp_hole_cache = nfp_cfg
+-        .nfp_hole_filling
+-        .then(holes::NfpHoleCache::new);
++    let mut nfp_hole_cache = nfp_cfg.nfp_hole_filling.then(holes::NfpHoleCache::new);
+ 
+     // separator가 어떤 상태로 넘어왔든 입력 해로 되돌리고 시작한다.
+-    sep.change_strip_width(init_sol.strip_width(), None);
+     sep.rollback(init_sol, None);
+ 
+     if sep.ct.get_total_loss() != 0.0 {
+         // 입력이 feasible하지 않으면 후처리의 전제가 깨진다.
+         info!("[PLSH] initial solution is not feasible, skipping");
+-        return (init_sol.clone(), PolishStats {
++        return (
++            init_sol.clone(),
++            PolishStats {
+                 rounds: 0,
+                 changes: 0,
+                 exit: PolishExit::RolledBackInfeasible,
+-            },);
+-    }
+-
+-    // All current polish evaluators model one polygon per decision variable.
+-    // The Separator move primitive is rigid-aware, but a target validated for
+-    // only one member can collide through another member. Preserve feasibility
+-    // by explicitly skipping these passes in grouped mode.
+-    if sep.has_place_groups() {
+-        info!("[PLSH] skipping single-item polish passes while rigid place groups are active");
+-        return (init_sol.clone(), PolishStats {
+-                rounds: 0,
+-                changes: 0,
+-                exit: PolishExit::NoChanges,
+-            },);
+-    }
+-
++            },
++        );
++    }
++
++    let grouped = sep.has_place_groups();
++    // Rigid units use whole-unit slide probes. Independent-item LP and hole
++    // reconstruction remain disabled until their models include rigid units.
+     let mut best_sol = init_sol.clone();
+     let init_width = init_sol.strip_width();
+ 
+@@ -160,18 +159,20 @@
+     // (폭이 단조 감소해야만 연장되므로 무한 반복은 불가능하다.)
+     let mut round = 0;
+     let mut total_changes = 0usize;
++    let mut unchanged_rounds = 0usize;
+     // 기본 사유는 "시계에 걸림". 아래 어느 break 도 안 타면 그게 맞다.
+     let mut exit = PolishExit::Killed;
+     loop {
+         if term.kill() {
+             break;
+         }
++        let before_pose = pose_signature(&sep.prob.save());
+         let mut changes = 0;
+ 
+         // 전역 LP가 큰 방향을 먼저 잡고, 결정론적 slide가 LP 선형화 뒤의 작은 틈을 회수한다.
+-        // LP simplex는 호출 중 외부 Terminator를 polling하지 못하므로 뒤 패스가 켜져 있으면
+-        // 현재 남은 시간의 일부만 배정해 slide/hole-fill 시간을 반드시 남겨 둔다.
+-        if config.lp.enabled {
++        // Reserve part of the remaining time for slide/hole-fill. Microlp polls
++        // the parent cancellation signal between resumable solver slices.
++        if config.lp.enabled && !grouped {
+             let lp_fraction = if config.slide.enabled || config.hole_fill.enabled {
+                 0.60
+             } else {
+@@ -184,7 +185,7 @@
+             changes += slide::slide_pass(sep, &config.slide, term);
+             sep.refit_strip();
+         }
+-        if config.hole_fill.enabled && !term.kill() {
++        if config.hole_fill.enabled && !grouped && !term.kill() {
+             changes += holes::hole_fill_pass_with_nfp(
+                 sep,
+                 &config.hole_fill,
+@@ -197,45 +198,56 @@
+         // 어떤 패스도 실행 가능성을 깨뜨리면 안 된다. 만약 깨졌다면 마지막 정상 해로 되돌린다.
+         if sep.ct.get_total_loss() != 0.0 {
+             info!("[PLSH] round {round} produced an infeasible layout, rolling back");
+-            sep.change_strip_width(best_sol.strip_width(), None);
+             sep.rollback(&best_sol, None);
+             exit = PolishExit::RolledBackInfeasible;
+             break;
+         }
+ 
+         let sol = sep.prob.save();
++        let pose_changed = pose_signature(&sol) != before_pose;
+         let width_improved = sol.strip_width() < best_sol.strip_width();
+-        if width_improved {
+-            info!(
+-                "[PLSH] round {round}: width {:.3} -> {:.3} ({:.3}%)",
+-                best_sol.strip_width(),
+-                sol.strip_width(),
+-                sol.density(instance) * 100.0
+-            );
++        // Keep equal-width left/down rearrangements for the next compression
++        // cycle, but never accept a wider layout for a secondary objective.
++        if width_improved
++            || (sol.strip_width() <= best_sol.strip_width()
++                && compactness(&sol) < compactness(&best_sol))
++        {
+             best_sol = sol;
+-            if let Some(l) = sol_listener.as_deref_mut() {
+-                l.report(ReportType::CmprFeas, &best_sol, instance);
++            if width_improved {
++                if let Some(l) = sol_listener.as_deref_mut() {
++                    l.report(ReportType::CmprFeas, &best_sol, instance);
++                }
+             }
+         }
+-
+-        total_changes += changes.max(0) as usize;
+-        if changes == 0 {
+-            // 패스가 전부 결정론적이므로 이건 진짜 고정점이다 — 예산이 남아도
+-            // 더 돌 이유가 없다.
++        total_changes += changes.max(usize::from(pose_changed));
++        round += 1;
++        if term.kill() {
++            exit = PolishExit::Killed;
++            break;
++        }
++        unchanged_rounds = if pose_changed {
++            0
++        } else {
++            unchanged_rounds + 1
++        };
++        if unchanged_rounds >= config.n_rounds.max(1) {
+             exit = PolishExit::NoChanges;
+             break;
+         }
+-        round += 1;
+-        if round >= config.n_rounds.max(1) && !width_improved {
++        if round >= config.n_rounds.max(1) && !width_improved && pose_changed {
+             exit = PolishExit::RoundCapWithoutImprovement;
+             break;
+         }
+     }
+ 
++    if crate::structure::pipeline::solution_validation_error(instance, &best_sol).is_some()
++        || !crate::util::assertions::frozen_poses_preserved(init_sol, &best_sol, &sep.frozen_mask)
++    {
++        best_sol = init_sol.clone();
++        exit = PolishExit::RolledBackInfeasible;
++    }
++
+     // 최종적으로 가장 좋은 해로 맞춰 둔다.
+-    if sep.prob.strip_width() != best_sol.strip_width() {
+-        sep.change_strip_width(best_sol.strip_width(), None);
+-    }
+     sep.rollback(&best_sol, None);
+ 
+     info!(
+@@ -255,6 +267,54 @@
+     )
+ }
+ 
++fn pose_signature(sol: &SPSolution) -> Vec<(usize, u32, u32, u32)> {
++    let mut poses: Vec<_> = sol
++        .layout_snapshot
++        .placed_items
++        .values()
++        .map(|p| {
++            let (x, y) = p.d_transf.translation();
++            (
++                p.item_id,
++                p.d_transf.rotation().to_bits(),
++                x.to_bits(),
++                y.to_bits(),
++            )
++        })
++        .collect();
++    poses.sort_unstable();
++    poses
++}
++
++fn compactness(
++    sol: &SPSolution,
++) -> (
++    ordered_float::OrderedFloat<f64>,
++    ordered_float::OrderedFloat<f64>,
++) {
++    let mut poses: Vec<_> = sol
++        .layout_snapshot
++        .placed_items
++        .values()
++        .map(|p| {
++            (
++                p.item_id,
++                p.shape.bbox.x_max as f64,
++                p.shape.bbox.y_max as f64,
++            )
++        })
++        .collect();
++    poses.sort_by(|a, b| {
++        a.0.cmp(&b.0)
++            .then_with(|| a.1.total_cmp(&b.1))
++            .then_with(|| a.2.total_cmp(&b.2))
++    });
++    (
++        ordered_float::OrderedFloat(poses.iter().map(|p| p.1).sum()),
++        ordered_float::OrderedFloat(poses.iter().map(|p| p.2).sum()),
++    )
++}
++
+ /// 부모 phase deadline과 외부 stop을 그대로 존중하면서 한 pass에 남은 시간의 일부만 허용한다.
+ /// 특히 `microlp::solve()`가 이 deadline을 직접 받아 장시간 simplex 호출을 제한한다.
+ struct FractionalTerminator<'a, T: Terminator + ?Sized> {
+--- a/swarm-core/src/optimizer/polish/probe.rs
++++ b/swarm-core/src/optimizer/polish/probe.rs
+@@ -71,43 +71,81 @@
+         scan_step: f32,
+         n_bisections: usize,
+     ) -> f32 {
+-        if max_dist <= 0.0 || !max_dist.is_finite() {
+-            return 0.0;
++        self.max_slide_with_control(base, dir, max_dist, scan_step, n_bisections, &mut || false)
++    }
++
++    pub fn max_slide_with_control(
++        &mut self,
++        base: DTransformation,
++        dir: (f32, f32),
++        max_dist: f32,
++        scan_step: f32,
++        n_bisections: usize,
++        should_stop: &mut dyn FnMut() -> bool,
++    ) -> f32 {
++        max_slide_distance(
++            base,
++            dir,
++            max_dist,
++            scan_step,
++            n_bisections,
++            &mut |dt| self.collides(dt),
++            should_stop,
++        )
++    }
++}
++
++pub(crate) fn max_slide_distance(
++    base: DTransformation,
++    dir: (f32, f32),
++    max_dist: f32,
++    scan_step: f32,
++    n_bisections: usize,
++    collides: &mut dyn FnMut(DTransformation) -> bool,
++    should_stop: &mut dyn FnMut() -> bool,
++) -> f32 {
++    if max_dist <= 0.0 || !max_dist.is_finite() {
++        return 0.0;
++    }
++    let step = scan_step.max(max_dist / 512.0);
++
++    // 전방 스캔: 마지막으로 비어 있던 거리와 최초로 막힌 거리를 찾는다.
++    let mut lo = 0.0f32; // 충돌 없음이 확인된 거리
++    let mut hi; // 충돌이 확인된 거리
++    let mut t = step;
++    loop {
++        if should_stop() {
++            return lo;
+         }
+-        let step = scan_step.max(max_dist / 512.0);
++        let probe_t = t.min(max_dist);
++        if collides(translated(base, dir, probe_t)) {
++            hi = probe_t;
++            break;
++        }
++        lo = probe_t;
++        if probe_t >= max_dist {
++            // 끝까지 비어 있다
++            return max_dist;
++        }
++        t += step;
++    }
+ 
+-        // 전방 스캔: 마지막으로 비어 있던 거리와 최초로 막힌 거리를 찾는다.
+-        let mut lo = 0.0f32; // 충돌 없음이 확인된 거리
+-        let mut hi; // 충돌이 확인된 거리
+-        let mut t = step;
+-        loop {
+-            let probe_t = t.min(max_dist);
+-            if self.collides(translated(base, dir, probe_t)) {
+-                hi = probe_t;
+-                break;
+-            }
+-            lo = probe_t;
+-            if probe_t >= max_dist {
+-                // 끝까지 비어 있다
+-                return max_dist;
+-            }
+-            t += step;
++    // 이분탐색으로 [lo, hi) 구간을 좁힌다.
++    for _ in 0..n_bisections {
++        if should_stop() {
++            break;
+         }
+-
+-        // 이분탐색으로 [lo, hi) 구간을 좁힌다.
+-        for _ in 0..n_bisections {
+-            let mid = 0.5 * (lo + hi);
+-            if mid <= lo || mid >= hi {
+-                break;
+-            }
+-            if self.collides(translated(base, dir, mid)) {
+-                hi = mid;
+-            } else {
+-                lo = mid;
+-            }
++        let mid = 0.5 * (lo + hi);
++        if mid <= lo || mid >= hi {
++            break;
+         }
+-        lo
++        if collides(translated(base, dir, mid)) {
++            hi = mid;
++        } else {
++            lo = mid;
++        }
+     }
++    lo
+ }
+ 
+ /// `dt`를 `dir` 방향으로 `dist`만큼 평행이동한 변환.
+--- a/swarm-core/src/optimizer/polish/slide.rs
++++ b/swarm-core/src/optimizer/polish/slide.rs
+@@ -35,10 +35,6 @@
+ ///
+ /// 반환값: 실제로 이동한 아이템 수
+ pub fn slide_pass(sep: &mut Separator, cfg: &SlideConfig, term: &impl Terminator) -> usize {
+-    if sep.has_place_groups() {
+-        debug!("[SLIDE] skipping single-polygon probe while rigid place groups are active");
+-        return 0;
+-    }
+     let mut total_moved = 0;
+ 
+     for pass in 0..cfg.n_passes.max(1) {
+@@ -66,6 +62,9 @@
+     cfg: &SlideConfig,
+     term: &impl Terminator,
+ ) -> usize {
++    if sep.has_place_groups() {
++        return slide_units_along(sep, dir, cfg, term);
++    }
+     // 진행 방향에 가까운 아이템부터 밀어야 뒤따르는 아이템이 그 자리를 이어받는다.
+     let order: Vec<PItemKey> = sep
+         .prob
+@@ -110,12 +109,13 @@
+             let min_dim = f32::min(item.shape_cd.bbox.width(), item.shape_cd.bbox.height());
+             let mut probe = CollisionProbe::new(&sep.prob.layout, item, pk);
+ 
+-            let dist = probe.max_slide(
++            let dist = probe.max_slide_with_control(
+                 d_transf,
+                 dir_vec,
+                 max_dist,
+                 min_dim * cfg.scan_step_ratio,
+                 cfg.n_bisections,
++                &mut || term.kill(),
+             );
+ 
+             if dist <= min_dim * cfg.min_move_ratio {
+@@ -137,6 +137,9 @@
+             }
+         };
+ 
++        if term.kill() {
++            break;
++        }
+         if let Some(new_dt) = target {
+             sep.move_item(pk, new_dt);
+             moved += 1;
+@@ -144,3 +147,103 @@
+     }
+     moved
+ }
++
++/// A rigid unit is probed as a whole against external hazards. Internal member
++/// poses remain invariant and every member contributes to the wall bound.
++fn slide_units_along(
++    sep: &mut Separator,
++    dir: SlideDir,
++    cfg: &SlideConfig,
++    term: &impl Terminator,
++) -> usize {
++    use jagua_rs::collision_detection::hazards::filter::HazKeyFilter;
++    use jagua_rs::geometry::geo_traits::TransformableFrom;
++    let axis_min = |b: jagua_rs::geometry::primitives::Rect| match dir {
++        SlideDir::Left => b.x_min,
++        SlideDir::Down => b.y_min,
++    };
++    let mut units: Vec<_> = sep
++        .place_groups
++        .placed_unit_representatives(&sep.prob.layout)
++        .into_iter()
++        .filter(|&id| !sep.frozen_mask.get(id).copied().unwrap_or(false))
++        .map(|id| {
++            let bound = sep
++                .place_groups
++                .member_item_ids(id)
++                .iter()
++                .filter_map(|&member| sep.placement_key(member))
++                .map(|pk| axis_min(sep.prob.layout.placed_items[pk].shape.bbox))
++                .fold(f32::INFINITY, f32::min);
++            (id, bound)
++        })
++        .collect();
++    units.sort_by_key(|&(id, bound)| (OrderedFloat(bound), id));
++    let mut moved = 0;
++    for (id, max_dist) in units {
++        if term.kill() {
++            break;
++        }
++        let Some(pk) = sep.placement_key(id) else {
++            continue;
++        };
++        let base = sep.prob.layout.placed_items[pk].d_transf;
++        let members = sep.place_groups.member_item_ids(id);
++        let filter = HazKeyFilter::from_keys(
++            members
++                .iter()
++                .filter_map(|&id| sep.placement_key(id))
++                .filter_map(|key| sep.prob.layout.cde().haz_key_from_pi_key(key)),
++        );
++        let mut buffers: Vec<_> = members
++            .iter()
++            .map(|&id| (id, sep.instance.item(id).shape_cd.as_ref().clone()))
++            .collect();
++        let min_dim = buffers
++            .iter()
++            .map(|(_, shape)| shape.bbox.width().min(shape.bbox.height()))
++            .fold(f32::INFINITY, f32::min);
++        let mut collides = |target| {
++            let Ok(targets) =
++                sep.place_groups
++                    .target_transforms(Some(&sep.prob.layout), id, target)
++            else {
++                return true;
++            };
++            targets.into_iter().any(|(member, dt)| {
++                if term.kill() {
++                    return true;
++                }
++                let item = sep.instance.item(member);
++                let buffer = &mut buffers.iter_mut().find(|(id, _)| *id == member).unwrap().1;
++                buffer.transform_from(&item.shape_cd, &dt.compose());
++                sep.prob.layout.cde().detect_poly_collision(buffer, &filter)
++            })
++        };
++        let dist = super::probe::max_slide_distance(
++            base,
++            dir.vec(),
++            max_dist,
++            min_dim * cfg.scan_step_ratio,
++            cfg.n_bisections,
++            &mut collides,
++            &mut || term.kill(),
++        );
++        let backed = dist - min_dim * cfg.safety_ratio;
++        let dist = if backed > min_dim * cfg.min_move_ratio
++            && !collides(translated(base, dir.vec(), backed))
++        {
++            backed
++        } else {
++            dist
++        };
++        if term.kill() {
++            break;
++        }
++        if dist > min_dim * cfg.min_move_ratio {
++            sep.move_item(pk, translated(base, dir.vec(), dist));
++            moved += 1;
++        }
++    }
++    moved
++}
+--- a/swarm-core/src/optimizer/reclaim.rs
++++ b/swarm-core/src/optimizer/reclaim.rs
+@@ -79,11 +79,7 @@
+     #[cfg(feature = "adaptive")]
+     {
+         crate::optimizer::explore_mods::exploration_phase_adaptive(
+-            instance,
+-            sep,
+-            &mut None,
+-            term,
+-            expl,
++            instance, sep, &mut None, term, expl,
+         )
+     }
+     #[cfg(not(feature = "adaptive"))]
+@@ -166,17 +162,10 @@
+     if !cfg.enabled {
+         return (certified, stats);
+     }
+-    if sep.has_place_groups() {
+-        // 압축은 그룹을 알지만, 폴리시 패스가 rigid group 에서 스스로 물러난다.
+-        // 반쪽짜리 사이클을 돌리느니 시작하지 않는다.
+-        info!("[RECLAIM] rigid place group 이 활성이라 회수를 건너뛴다");
+-        return (certified, stats);
+-    }
+-
+     // 무개선을 몇 번까지 참을지. 모드의 성격이 정한다.
+     let stagnation_limit = match cfg.mode {
+-        // 결정론적이다 — 같은 해에 같은 사이클을 다시 돌려도 같은 결과다.
+-        // 한 번 못 줄이면 더 돌 이유가 없다.
++        // Conservative retry policy for compression reentry; its split selection
++        // is stochastic, so one failed cycle is not a proof of convergence.
+         ReclaimMode::CompressReentry => 1,
+         // 확률적이다 — 한 번 못 찾았다고 수렴한 게 아니다. 첫 실패에 멈추면
+         // 예산을 크게 남긴다(실측: R&R 이 60초 중 24초만 쓰고 멈췄다).
+@@ -215,7 +204,6 @@
+         //
+         // 어느 모드든 출발점은 현재 최선이고, 끝나면 `compressed` 에 후보가 담긴다.
+         // 실행 불가능한 상태로 나올 수 있으므로 뒤의 폴리시 전에 반드시 검증한다.
+-        sep.change_strip_width(best.strip_width(), None);
+         sep.rollback(&best, None);
+         // 정지 요청을 보는 조각 터미네이터 — `SliceTerminator` 문서 참조.
+         let term = SliceTerminator::new(outer, cmpr_slice);
+@@ -258,7 +246,6 @@
+                 let (separated, snapshot) = sep.separate(&term, &mut None);
+                 if snapshot.get_total_loss() != 0.0 {
+                     // 못 풀었다 — 이 사이클은 버리고 최선으로 돌아간다.
+-                    sep.change_strip_width(best.strip_width(), None);
+                     sep.rollback(&best, None);
+                     best.clone()
+                 } else {
+@@ -301,7 +288,6 @@
+         plsh.time_limit = plsh_slice;
+         // 중첩 회수는 금지한다. 여기서 또 회수를 켜면 재귀가 된다.
+         plsh.reclaim.enabled = false;
+-        sep.change_strip_width(compressed.strip_width(), None);
+         sep.rollback(&compressed, None);
+         let term = SliceTerminator::new(outer, plsh_slice);
+         let polished = crate::optimizer::polish::polish_phase_with_nfp(
+@@ -318,7 +304,9 @@
+         // ── 폭 게이트 ──
+         //
+         // 인증기는 실행 가능성만 보고 폭은 보지 않는다. 좁아졌을 때만 받는다.
+-        let improved = polished.strip_width() < best.strip_width();
++        let improved = polished.strip_width() < best.strip_width()
++            && crate::util::assertions::frozen_poses_preserved(&best, &polished, &sep.frozen_mask)
++            && crate::structure::pipeline::solution_validation_error(instance, &polished).is_none();
+         if improved {
+             info!(
+                 "[RECLAIM] 사이클 {cycle}: {:.3} -> {:.3} ({:+.3}mm)",
+@@ -345,9 +333,6 @@
+ 
+     // 마지막에 반드시 최선으로 맞춰 둔다. 루프가 개선 없는 사이클로 끝났다면
+     // separator 는 그 버려진 해 위에 있다.
+-    if sep.prob.strip_width() != best.strip_width() {
+-        sep.change_strip_width(best.strip_width(), None);
+-    }
+     sep.rollback(&best, None);
+ 
+     stats.width_after = best.strip_width();
+@@ -386,25 +371,10 @@
+     /// 함께 지킨다 — `attempt_to_compress` 가 시도마다 `sep.rng` 를 뽑으므로
+     /// 한 번만 새어도 이후 난수 스트림이 어긋난다.
+     #[test]
+-    fn reclaim_is_on_by_default_and_the_off_switch_is_a_true_no_op() {
+-        assert!(cfg().enabled, "기본은 켜짐이다");
+-        let src = include_str!("reclaim.rs");
+-        let production = &src[..src.find("#[cfg(test)]").expect("테스트 모듈 경계")];
+-        assert!(
+-            !production.contains("fn reclaim_is_on_by_default"),
+-            "생산 코드 절단이 잘못됐다"
+-        );
+-        // 비활성 반환이 `sep` 사용보다 **앞에** 있어야 한다.
+-        let guard = production
+-            .find("if !cfg.enabled {")
+-            .expect("비활성 조기 반환이 없다");
+-        let first_sep_use = production
+-            .find("sep.has_place_groups()")
+-            .expect("sep 첫 사용 지점을 못 찾았다");
+-        assert!(
+-            guard < first_sep_use,
+-            "끔 분기가 sep 사용보다 뒤에 있다 — 난수 스트림이 샌다"
+-        );
++    fn reclaim_is_on_by_default() {
++        assert!(cfg().enabled);
++        // Actual no-op behavior (poses, width, and RNG) is covered by the
++        // parallel_optimization integration test, without matching source text.
+     }
+ 
+     /// 폴리시 몫이 0이 되면 압축 결과를 다듬지 못해 재진입의 절반이 죽는다.
+@@ -456,11 +426,11 @@
+ 
+     /// **정체 허용은 모드의 성격을 따라야 한다.**
+     ///
+-    /// 압축 재진입은 결정론적이라 한 번 실패하면 끝이다. 탈출 계열은 확률적이라
++    /// 압축 재진입은 보수적으로 한 번 실패하면 끝낸다. 탈출 계열은
+     /// 첫 실패에 멈추면 예산을 크게 남긴다 — 실측에서 R&R 이 60초 중 24초만 쓰고
+     /// 36초를 남겼고, 허용을 넣자 -0.01mm 에서 -22.97mm 로 뛰었다.
+     #[test]
+-    fn stochastic_modes_tolerate_a_barren_cycle_but_the_deterministic_one_does_not() {
++    fn escape_modes_allow_more_stagnant_cycles_than_compression_reentry() {
+         let src = include_str!("reclaim.rs");
+         let production = &src[..src.find("#[cfg(test)]").expect("테스트 모듈 경계")];
+         assert!(
+--- a/swarm-core/src/optimizer/separator.rs
++++ b/swarm-core/src/optimizer/separator.rs
+@@ -52,6 +52,7 @@
+ 
+ pub struct Separator {
+     pub instance: SPInstance,
++    pub run_control: std::sync::Arc<crate::config::runtime::RunControl>,
+     pub rng: Xoshiro256PlusPlus,
+     pub prob: SPProblem,
+     pub ct: CollisionTracker,
+@@ -96,7 +97,10 @@
+         // ① NFP 샘플러: 준비본(pair NFP·마스크·정규화 영역)은 **한 번만** 만들고
+         // 워커마다 `fork()` 로 나눈다. `fork` 는 `Arc` 사본이라 기하를 다시 만들지 않으면서
+         // 워커별 가변 상태를 분리한다 — 병렬 separation 이 `&mut` 로 막히지 않는다.
+-        let nfp_seed = config.nfp_sampler.then(|| build_nfp_sampler_cache(&instance)).flatten();
++        let nfp_seed = config
++            .nfp_sampler
++            .then(|| build_nfp_sampler_cache(&instance))
++            .flatten();
+         let workers = (0..n_workers)
+             .map(|_| SeparatorWorker {
+                 instance: instance.clone(),
+@@ -122,6 +126,7 @@
+         };
+ 
+         Self {
++            run_control: crate::config::runtime::current_control(),
+             prob,
+             instance,
+             rng,
+@@ -391,8 +396,10 @@
+                 .par_iter_mut()
+                 .map(|worker| {
+                     worker.load(&master_sol, &self.ct);
+-                    worker.frozen_mask.copy_from_slice(&self.frozen_mask);
+-                    worker.place_groups = self.place_groups.clone();
++                    worker.frozen_mask.clone_from(&self.frozen_mask);
++                    if worker.place_groups != self.place_groups {
++                        worker.place_groups.clone_from(&self.place_groups);
++                    }
+                     worker.move_items(term)
+                 })
+                 .sum()
+@@ -414,7 +421,8 @@
+         let best_idx = self
+             .workers
+             .iter()
+-            .position_min_by_key(|opt| OrderedFloat(opt.ct.get_total_weighted_loss()))
++            .map(|opt| OrderedFloat(opt.ct.get_total_weighted_loss()))
++            .position_min()
+             .unwrap();
+ 
+         let best_sol = self.workers[best_idx].prob.save();
+@@ -426,7 +434,8 @@
+     }
+ 
+     pub fn rollback(&mut self, sol: &SPSolution, ots: Option<&CTSnapshot>) {
+-        debug_assert!(sol.strip_width() == self.prob.strip_width());
++        // SPProblem::restore installs the target container and layout together.
++        // Shrinking the old layout first can strand frozen items outside the CDE.
+         self.prob.restore(sol);
+ 
+         match ots {
+@@ -439,13 +448,36 @@
+         }
+     }
+ 
+-    pub fn move_item(&mut self, pk: PItemKey, d_transf: DTransformation) -> PItemKey {
++    pub fn move_item(&mut self, pk: PItemKey, dt: DTransformation) -> PItemKey {
++        debug_assert!(tracker_matches_layout(&self.ct, &self.prob.layout));
++        let result = self.move_item_inner(pk, dt);
++        debug_assert!(tracker_matches_layout(&self.ct, &self.prob.layout));
++        result
++    }
++
++    /// Apply a batch with a consistent tracker after every move. The caller must
++    /// restore its snapshot if cancellation interrupts a transactional proposal.
++    pub(crate) fn move_items_with_control(
++        &mut self,
++        moves: &[(PItemKey, DTransformation)],
++        should_stop: &mut dyn FnMut() -> bool,
++    ) -> bool {
++        debug_assert!(tracker_matches_layout(&self.ct, &self.prob.layout));
++        for &(pk, dt) in moves {
++            if should_stop() {
++                return false;
++            }
++            self.move_item_inner(pk, dt);
++        }
++        debug_assert!(tracker_matches_layout(&self.ct, &self.prob.layout));
++        !should_stop()
++    }
++
++    fn move_item_inner(&mut self, pk: PItemKey, d_transf: DTransformation) -> PItemKey {
+         let item_id = self.prob.layout.placed_items[pk].item_id;
+         if item_id < self.frozen_mask.len() && self.frozen_mask[item_id] {
+             return pk;
+         }
+-
+-        debug_assert!(tracker_matches_layout(&self.ct, &self.prob.layout));
+ 
+         // Preserve the exact legacy behavior, including support for item kinds
+         // with demand > 1 (where item_id cannot identify a placement key).
+@@ -453,7 +485,6 @@
+             self.prob.remove_item(pk);
+             let new_pk = self.prob.place_item(SPPlacement { d_transf, item_id });
+             self.ct.register_item_move(&self.prob.layout, pk, new_pk);
+-            debug_assert!(tracker_matches_layout(&self.ct, &self.prob.layout));
+             return new_pk;
+         }
+ 
+@@ -488,72 +519,80 @@
+             }
+         }
+ 
+-        debug_assert!(tracker_matches_layout(&self.ct, &self.prob.layout));
+-
+         selected_new_pk
+     }
+ 
+     pub fn change_strip_width(&mut self, new_width: f32, split_position: Option<f32>) {
++        self.change_strip_width_with_control(new_width, split_position, &mut || false);
++    }
++
++    /// A cancelled width proposal restores the original layout before returning.
++    pub fn change_strip_width_with_control(
++        &mut self,
++        new_width: f32,
++        split_position: Option<f32>,
++        should_stop: &mut dyn FnMut() -> bool,
++    ) -> bool {
++        if should_stop() {
++            return false;
++        }
+         let split_position = split_position.unwrap_or(self.prob.strip_width() / 2.0);
+         let delta = new_width - self.prob.strip_width();
+-
+-        if self.place_groups.is_empty() {
+-            let items_to_shift = self
+-                .prob
++        let saved = self.prob.save();
++        let moves = if self.place_groups.is_empty() {
++            self.prob
+                 .layout
+                 .placed_items
+                 .iter()
+                 .filter(|(_, pi)| pi.shape.centroid().0 > split_position)
+-                .map(|(pk, pi)| (pk, pi.d_transf))
+-                .collect_vec();
+-            for (pk, d_transf) in items_to_shift {
+-                let new_transf = d_transf.compose().translate((delta, 0.0));
+-                self.move_item(pk, new_transf.decompose());
+-            }
+-            self.prob.change_strip_width(new_width);
+-            self.resync();
+-            debug!("[SEP] changed strip width to {:.3}", new_width);
+-            return;
+-        }
+-
+-        // Select placement units, not individual members. A group straddling
+-        // the split is shifted once according to its combined bbox centre.
+-        let units_to_shift = self
+-            .place_groups
+-            .placed_unit_representatives(&self.prob.layout)
+-            .into_iter()
+-            .filter_map(|unit_id| {
+-                let member_pks = self
+-                    .place_groups
+-                    .member_item_ids(unit_id)
+-                    .into_iter()
+-                    .filter_map(|id| self.placement_key(id))
+-                    .collect_vec();
+-                let x_min = member_pks
+-                    .iter()
+-                    .map(|pk| self.prob.layout.placed_items[*pk].shape.bbox.x_min)
+-                    .fold(f32::INFINITY, f32::min);
+-                let x_max = member_pks
+-                    .iter()
+-                    .map(|pk| self.prob.layout.placed_items[*pk].shape.bbox.x_max)
+-                    .fold(f32::NEG_INFINITY, f32::max);
+-                ((x_min + x_max) * 0.5 > split_position).then_some(unit_id)
+-            })
+-            .collect_vec();
+-
+-        for item_id in units_to_shift {
+-            let Some(pk) = self.placement_key(item_id) else {
+-                continue;
+-            };
+-            let existing_transf = self.prob.layout.placed_items[pk].d_transf.compose();
+-            let new_transf = existing_transf.translate((delta, 0.0));
+-            self.move_item(pk, new_transf.decompose());
+-        }
+-
++                .map(|(pk, pi)| {
++                    (
++                        pk,
++                        pi.d_transf.compose().translate((delta, 0.0)).decompose(),
++                    )
++                })
++                .collect_vec()
++        } else {
++            self.place_groups
++                .placed_unit_representatives(&self.prob.layout)
++                .into_iter()
++                .filter_map(|unit_id| {
++                    let keys = self
++                        .place_groups
++                        .member_item_ids(unit_id)
++                        .into_iter()
++                        .filter_map(|id| self.placement_key(id))
++                        .collect_vec();
++                    let x_min = keys
++                        .iter()
++                        .map(|pk| self.prob.layout.placed_items[*pk].shape.bbox.x_min)
++                        .fold(f32::INFINITY, f32::min);
++                    let x_max = keys
++                        .iter()
++                        .map(|pk| self.prob.layout.placed_items[*pk].shape.bbox.x_max)
++                        .fold(f32::NEG_INFINITY, f32::max);
++                    let pk = self.placement_key(unit_id)?;
++                    ((x_min + x_max) * 0.5 > split_position).then(|| {
++                        (
++                            pk,
++                            self.prob.layout.placed_items[pk]
++                                .d_transf
++                                .compose()
++                                .translate((delta, 0.0))
++                                .decompose(),
++                        )
++                    })
++                })
++                .collect_vec()
++        };
++        if !self.move_items_with_control(&moves, should_stop) {
++            self.rollback(&saved, None);
++            return false;
++        }
+         self.prob.change_strip_width(new_width);
+-
+         self.resync();
+         debug!("[SEP] changed strip width to {:.3}", new_width);
++        true
+     }
+ 
+     /// 아이템을 전혀 이동시키지 않고 strip 폭만 현재 배치에 맞춰 축소한다.
+@@ -561,7 +600,10 @@
+     /// 이미 feasible한 배치를 그대로 둔 채 남는 폭만 회수할 때 사용한다.
+     /// 폭이 실제로 바뀐 경우 `true`를 반환한다.
+     pub fn refit_strip(&mut self) -> bool {
+-        if self.prob.layout.placed_items.is_empty() {
++        if self.prob.layout.placed_items.is_empty() || !self.prob.layout.is_feasible() {
++            // The tracker excludes frozen/frozen loss and collision queries can
++            // be asymmetric at tangencies. fit_strip requires a feasible layout;
++            // never use a container resize to hide a failed placement check.
+             return false;
+         }
+         let before = self.prob.strip_width();
+@@ -581,8 +623,6 @@
+         self.ct = CollisionTracker::new_with_frozen(&self.prob.layout, &self.frozen_mask);
+ 
+         for w in self.workers.iter_mut() {
+-            w.prob = self.prob.clone();
+-            w.ct.copy_from(&self.ct);
+             w.rng = Xoshiro256PlusPlus::seed_from_u64(self.rng.random());
+             w.sample_config = self.config.sample_config;
+             w.frozen_mask.clone_from(&self.frozen_mask);
+--- a/swarm-core/src/optimizer/worker.rs
++++ b/swarm-core/src/optimizer/worker.rs
+@@ -57,12 +57,17 @@
+     mut make_evaluator: impl FnMut() -> E,
+     sample_config: SampleConfig,
+     rng: &mut Xoshiro256PlusPlus,
++    term: &impl Terminator,
+ ) -> (
+     Option<(DTransformation, crate::eval::sample_eval::SampleEval)>,
+     usize,
+ ) {
++    if term.kill() {
++        return (None, 0);
++    }
++    let mut nfp_evals = 0;
+     if let Some(cache) = nfp.as_mut() {
+-        let (best, n_evals) = crate::sample::nfp_sampler::search_placement_nfp(
++        let (best, n_evals) = crate::sample::nfp_sampler::search_placement_nfp_with_control(
+             layout,
+             item,
+             pk,
+@@ -70,17 +75,27 @@
+             sample_config,
+             cache,
+             rng,
++            &mut || term.kill(),
+         );
+-        if best.is_some() {
++        nfp_evals = n_evals;
++        if best.is_some() || term.kill() {
+             return (best, n_evals);
+         }
+     }
+-    search::search_placement(layout, item, pk, make_evaluator(), sample_config, rng)
++    let (best, evals) = search::search_placement_with_control(
++        layout,
++        item,
++        pk,
++        make_evaluator(),
++        sample_config,
++        rng,
++        &mut || term.kill(),
++    );
++    (best, nfp_evals + evals)
+ }
+ 
+ impl SeparatorWorker {
+     pub fn load(&mut self, sol: &SPSolution, ct: &CollisionTracker) {
+-        debug_assert!(sol.strip_width() == self.prob.strip_width());
+         self.prob.restore(sol);
+         // clone() 대신 버퍼 재사용 복사 — 매 iteration마다 O(n²) 재할당을 피한다
+         self.ct.copy_from(ct);
+@@ -145,6 +160,7 @@
+                         },
+                         sample_config,
+                         &mut self.rng,
++                        term,
+                     )
+                 } else {
+                     search_placement_maybe_nfp(
+@@ -155,11 +171,16 @@
+                         || SeparationEvaluator::new(layout, item, pk, ct),
+                         sample_config,
+                         &mut self.rng,
++                        term,
+                     )
+                 };
+ 
+-                let (new_dt, _eval) =
+-                    best_sample.expect("search_placement should always return a sample");
++                if term.kill() {
++                    break;
++                }
++                let Some((new_dt, _eval)) = best_sample else {
++                    continue;
++                };
+ 
+                 self.move_item(pk, new_dt);
+                 total_moves += 1;
+@@ -209,8 +230,14 @@
+                 || SeparationEvaluator::new(layout, item, pk, ct),
+                 sample_config,
+                 &mut self.rng,
++                term,
+             );
+-            let (new_dt, _) = best_sample.expect("search_placement should always return a sample");
++            if term.kill() {
++                break;
++            }
++            let Some((new_dt, _)) = best_sample else {
++                continue;
++            };
+             self.move_item(pk, new_dt);
+             total_moves += 1;
+             total_evals += n_evals;
+--- a/swarm-core/src/sample/coord_descent.rs
++++ b/swarm-core/src/sample/coord_descent.rs
+@@ -23,35 +23,34 @@
+     pub r_range: Option<f32>,
+ }
+ 
+-/// Refines an initial 'sample' (transformation and evaluation) into a local minimum using a coordinate descent inspired algorithm.
+-pub fn refine_coord_desc(
+-    (init_dt, init_eval): (DTransformation, SampleEval),
++/// Returns the best evaluated pose when cancellation interrupts a refinement.
++pub fn refine_coord_desc_with_control(
++    start: (DTransformation, SampleEval),
+     evaluator: &mut impl SampleEvaluator,
+     cd_config: CDConfig,
+     rng: &mut impl Rng,
++    should_stop: &mut dyn FnMut() -> bool,
+ ) -> (DTransformation, SampleEval) {
+-    refine_coord_desc_impl((init_dt, init_eval), evaluator, cd_config, None, rng)
+-}
+-
+-/// Coordinate descent with a rotation clamp centred on an immutable declared
+-/// orientation rather than on the current refinement input.
+-///
+-/// The public [`refine_coord_desc`] entry point intentionally keeps its existing
+-/// start-relative semantics. Search code for discrete rotations uses this
+-/// crate-private variant so repeated refinements cannot walk the clamp window.
+-pub(crate) fn refine_coord_desc_around_rotation(
+-    (init_dt, init_eval): (DTransformation, SampleEval),
++    refine_coord_desc_impl(start, evaluator, cd_config, None, rng, should_stop)
++}
++
++/// Refine around an immutable declared rotation, so repeated searches cannot
++/// walk the allowed tilt window away from the configured orientation.
++pub(crate) fn refine_coord_desc_around_rotation_with_control(
++    start: (DTransformation, SampleEval),
+     evaluator: &mut impl SampleEvaluator,
+     cd_config: CDConfig,
+     rotation_anchor: f32,
+     rng: &mut impl Rng,
++    should_stop: &mut dyn FnMut() -> bool,
+ ) -> (DTransformation, SampleEval) {
+     refine_coord_desc_impl(
+-        (init_dt, init_eval),
++        start,
+         evaluator,
+         cd_config,
+         Some(rotation_anchor),
+         rng,
++        should_stop,
+     )
+ }
+ 
+@@ -61,6 +60,7 @@
+     cd_config: CDConfig,
+     rotation_anchor: Option<f32>,
+     rng: &mut impl Rng,
++    should_stop: &mut dyn FnMut() -> bool,
+ ) -> (DTransformation, SampleEval) {
+     let n_evals_init = evaluator.n_evals();
+     let init_pos = init_dt;
+@@ -87,6 +87,9 @@
+ 
+     // From the CD state, ask for candidate positions to evaluate. If none provided, stop.
+     while let Some(c) = cd.ask() {
++        if should_stop() || evaluator.n_evals().saturating_sub(n_evals_init) >= 1000 {
++            break;
++        }
+         // Evaluate the candidates using the evaluator.
+         let c_eval = c.map(|c| evaluator.evaluate_sample(c, Some(cd.eval)));
+ 
+@@ -99,10 +102,6 @@
+         // Report the best candidate to the coordinate descent state.
+         cd.tell(best, rng);
+         trace!("CD: {:?}", cd);
+-        debug_assert!(
+-            evaluator.n_evals() - n_evals_init < 1000,
+-            "coordinate descent exceeded 1000 evals"
+-        );
+     }
+     trace!(
+         "CD: {} evals, {} -> {}, eval: {:?}",
+@@ -262,3 +261,44 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod budget_tests {
++    use super::*;
++    use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
++
++    struct AlwaysImproving(usize);
++    impl SampleEvaluator for AlwaysImproving {
++        fn evaluate_sample(&mut self, _: DTransformation, _: Option<SampleEval>) -> SampleEval {
++            self.0 += 1;
++            SampleEval::Clear {
++                loss: -(self.0 as f32),
++            }
++        }
++        fn n_evals(&self) -> usize {
++            self.0
++        }
++    }
++
++    #[test]
++    fn pathological_refinement_has_a_release_budget_and_returns_the_best() {
++        let config = CDConfig {
++            t_step_init: 1.0,
++            t_step_limit: 0.001,
++            r_step_init: 0.1,
++            r_step_limit: 0.001,
++            wiggle: false,
++            r_range: None,
++        };
++        let mut evaluator = AlwaysImproving(0);
++        let (_, best) = refine_coord_desc_with_control(
++            (DTransformation::empty(), SampleEval::Clear { loss: 0.0 }),
++            &mut evaluator,
++            config,
++            &mut Xoshiro256PlusPlus::seed_from_u64(1),
++            &mut || false,
++        );
++        assert_eq!(evaluator.n_evals(), 1000);
++        assert_eq!(best, SampleEval::Clear { loss: -1000.0 });
++    }
++}
+--- a/swarm-core/src/sample/nfp_sampler.rs
++++ b/swarm-core/src/sample/nfp_sampler.rs
+@@ -51,8 +51,7 @@
+ use jagua_rs::geometry::geo_enums::RotationRange;
+ use rand::Rng;
+ use swarm_nfp::{
+-    GRID_SCALE, Location, NfpEngine, Point as NfpPoint, PolygonSet, PreparedRegion,
+-    Ring as NfpRing,
++    GRID_SCALE, Location, NfpEngine, Point as NfpPoint, PolygonSet, PreparedRegion, Ring as NfpRing,
+ };
+ 
+ use crate::eval::sample_eval::{SampleEval, SampleEvaluator};
+@@ -102,6 +101,27 @@
+ /// `cache`는 호출자가 소유한 [`NfpLbfCache`]다. pair NFP·[`PreparedRegion`]·마스크가
+ /// 전부 그 안에서 `Arc`로 공유되므로, 이 함수는 아이템마다 기하를 새로 만들지 않는다.
+ pub fn search_placement_nfp(
++    l: &Layout,
++    item: &Item,
++    ref_pk: Option<PItemKey>,
++    evaluator: impl SampleEvaluator,
++    sample_config: SampleConfig,
++    cache: &mut NfpLbfCache,
++    rng: &mut impl Rng,
++) -> (Option<(DTransformation, SampleEval)>, usize) {
++    search_placement_nfp_with_control(
++        l,
++        item,
++        ref_pk,
++        evaluator,
++        sample_config,
++        cache,
++        rng,
++        &mut || false,
++    )
++}
++
++pub fn search_placement_nfp_with_control(
+     l: &Layout,
+     item: &Item,
+     ref_pk: Option<PItemKey>,
+@@ -109,6 +129,7 @@
+     sample_config: SampleConfig,
+     cache: &mut NfpLbfCache,
+     rng: &mut impl Rng,
++    should_stop: &mut dyn FnMut() -> bool,
+ ) -> (Option<(DTransformation, SampleEval)>, usize) {
+     // NFP 후보 열거는 완전히 결정적이다. 난수는 쓰지 않지만, 호출부가 기존 샘플러와
+     // 이 함수를 한 자리에서 교체할 수 있도록 시그니처는 그대로 맞춰 둔다.
+@@ -117,7 +138,7 @@
+     let eval_budget = sample_config.n_container_samples.max(1);
+     let probe_budget = eval_budget.saturating_mul(PROBE_BUDGET_SCALE);
+ 
+-    let candidates = collect_candidates(l, item, ref_pk, cache, probe_budget);
++    let candidates = collect_candidates(l, item, ref_pk, cache, probe_budget, should_stop);
+     if candidates.is_empty() {
+         log::debug!(
+             "[nfp-sampler] item {} 후보 0개 — 호출자가 기존 샘플러로 폴백해야 한다",
+@@ -132,6 +153,9 @@
+     //     이게 곧 "가장 덜 움직이는 자리"(separator) 또는 "가장 좌하단"(그 외)이다.
+     let mut best: Option<(DTransformation, SampleEval)> = None;
+     for cand in candidates.iter().take(eval_budget) {
++        if should_stop() {
++            break;
++        }
+         let bound = best.map_or(SampleEval::Invalid, |(_, eval)| eval);
+         let eval = evaluator.evaluate_sample(cand.dt, Some(bound));
+         if eval < bound {
+@@ -237,6 +261,7 @@
+     ref_pk: Option<PItemKey>,
+     cache: &mut NfpLbfCache,
+     probe_budget: usize,
++    should_stop: &mut dyn FnMut() -> bool,
+ ) -> Vec<Candidate> {
+     let empty = Vec::new();
+ 
+@@ -281,6 +306,9 @@
+     // evaluator에서 전부 기각된다. 차라리 즉시 폴백하는 편이 싸다.
+     let mut refs: Vec<ObstacleRef> = Vec::with_capacity(l.placed_items.len());
+     for (pk, pi) in l.placed_items.iter() {
++        if should_stop() {
++            return empty;
++        }
+         // 지금 옮기는 조각 자신은 장애물이 아니다.
+         if Some(pk) == ref_pk {
+             continue;
+@@ -293,7 +321,10 @@
+             return empty;
+         };
+         let Some(rotation) = normalized_degrees(pi.d_transf.rotation()) else {
+-            log::debug!("[nfp-sampler] 배치된 item {} 의 자세가 정수 도가 아니다 — 폴백", pi.item_id);
++            log::debug!(
++                "[nfp-sampler] 배치된 item {} 의 자세가 정수 도가 아니다 — 폴백",
++                pi.item_id
++            );
+             return empty;
+         };
+         if cache.library().shape(hash, rotation).is_none() {
+@@ -317,12 +348,10 @@
+     // separator는 겹침을 푸는 중이다. 같은 손실이면 **가장 덜 움직이는** 자리가
+     // 나머지 레이아웃을 가장 덜 흔든다. 그래서 참조 배치가 있으면 그 자리로부터의
+     // 거리순, 없으면(초기 배치 문맥) LBF의 본래 의도대로 좌하단순으로 평가한다.
+-    let anchor = ref_pk
+-        .and_then(|pk| l.placed_items.get(pk))
+-        .map(|pi| {
+-            let (x, y) = pi.d_transf.translation();
+-            (x as f64 - ox, y as f64 - oy)
+-        });
++    let anchor = ref_pk.and_then(|pk| l.placed_items.get(pk)).map(|pi| {
++        let (x, y) = pi.d_transf.translation();
++        (x as f64 - ox, y as f64 - oy)
++    });
+ 
+     // ── 회전별 후보 ──────────────────────────────────────────────────────
+     let engine = NfpEngine::new();
+@@ -331,7 +360,7 @@
+     let mut points: Vec<(f64, f64)> = Vec::new();
+ 
+     for (deg, rot_rad) in rotations {
+-        if probes_left == 0 {
++        if probes_left == 0 || should_stop() {
+             break;
+         }
+         points.clear();
+@@ -345,6 +374,7 @@
+             &refs,
+             &mut probes_left,
+             &mut points,
++            should_stop,
+         );
+         for &(x, y) in points.iter() {
+             let dt = DTransformation::new(rot_rad, ((x + ox) as f32, (y + oy) as f32));
+@@ -381,6 +411,7 @@
+     refs: &[ObstacleRef],
+     probes_left: &mut usize,
+     out: &mut Vec<(f64, f64)>,
++    should_stop: &mut dyn FnMut() -> bool,
+ ) {
+     let eps = COORD_TIE_EPS as f64;
+ 
+@@ -400,6 +431,9 @@
+     // ── 장애물별 금지 영역 (캐시의 Arc만 빌린다 — 기하 복사 0회) ──
+     let mut obstacles: Vec<Obstacle> = Vec::with_capacity(refs.len());
+     for r in refs {
++        if should_stop() {
++            return;
++        }
+         let key = NfpKey::new(r.hash, r.rotation, hash_item, deg);
+         let Some((region, mask, prepared)) = cache.view_prepared_or_compute(key) else {
+             // 이 회전의 금지 영역을 다 못 만들었다 = 모델이 불완전하다. 회전 하나를
+@@ -438,6 +472,9 @@
+ 
+     // 1) NFP vertex
+     'vertices: for (oi, o) in obstacles.iter().enumerate() {
++        if should_stop() {
++            return;
++        }
+         for ring in rings(&o.region) {
+             for v in &ring.vertices {
+                 if raw.len() >= MAX_RAW_CANDIDATES {
+@@ -465,6 +502,9 @@
+     // 앞 조각에 밀착"처럼 난수가 절대 못 맞히는 자세다.
+     let ifp_edges = edges_of(&ifp, 0.0, 0.0);
+     'boundary: for o in obstacles.iter() {
++        if should_stop() {
++            return;
++        }
+         if !o.bbox.overlaps(ifp_bbox, eps) {
+             continue;
+         }
+@@ -497,7 +537,7 @@
+ 
+     // ── feasible 판정 ────────────────────────────────────────────────────
+     for (x, y, origin) in unique {
+-        if *probes_left == 0 {
++        if *probes_left == 0 || should_stop() {
+             break;
+         }
+         *probes_left -= 1;
+--- a/swarm-core/src/sample/search.rs
++++ b/swarm-core/src/sample/search.rs
+@@ -5,7 +5,7 @@
+ use crate::eval::sample_eval::{SampleEval, SampleEvaluator};
+ use crate::sample::best_samples::{BestSamples, dtransfs_are_similar};
+ use crate::sample::coord_descent::{
+-    CDConfig, refine_coord_desc, refine_coord_desc_around_rotation,
++    CDConfig, refine_coord_desc_around_rotation_with_control, refine_coord_desc_with_control,
+ };
+ use crate::sample::uniform_sampler::UniformBBoxSampler;
+ use jagua_rs::entities::{Item, Layout, PItemKey};
+@@ -400,12 +400,13 @@
+         if should_stop() {
+             break;
+         }
+-        let descended = refine_coord_desc_for_allowed_rotation(
++        let descended = refine_coord_desc_for_allowed_rotation_with_control(
+             start,
+             &mut evaluator,
+             prerefine_cd_config(item, sample_config.tilt_range),
+             &item.allowed_rotation,
+             rng,
++            should_stop,
+         );
+         best_samples.report(descended.0, descended.1);
+     }
+@@ -465,12 +466,13 @@
+             };
+             return (Some(selected), second);
+         }
+-        Some(selected) => refine_coord_desc_for_allowed_rotation(
++        Some(selected) => refine_coord_desc_for_allowed_rotation_with_control(
+             selected,
+             evaluator,
+             cd_config,
+             allowed_rotation,
+             rng,
++            should_stop,
+         ),
+     };
+ 
+@@ -487,13 +489,17 @@
+         return (Some(selected), None);
+     }
+ 
+-    let second = refine_coord_desc_for_allowed_rotation(
++    let second = refine_coord_desc_for_allowed_rotation_with_control(
+         second_candidate,
+         evaluator,
+         cd_config,
+         allowed_rotation,
+         rng,
+-    );
++        should_stop,
++    );
++    if should_stop() {
++        return (Some(selected), None);
++    }
+     let (best, second_eval) = rank_refined_top_two(selected, second, unique_thresh);
+     (Some(best), Some(second_eval))
+ }
+@@ -547,6 +553,7 @@
+     }
+ }
+ 
++#[cfg(test)]
+ fn refine_coord_desc_for_allowed_rotation(
+     start: (DTransformation, SampleEval),
+     evaluator: &mut impl SampleEvaluator,
+@@ -554,9 +561,34 @@
+     allowed_rotation: &RotationRange,
+     rng: &mut impl Rng,
+ ) -> (DTransformation, SampleEval) {
++    refine_coord_desc_for_allowed_rotation_with_control(
++        start,
++        evaluator,
++        cd_config,
++        allowed_rotation,
++        rng,
++        &mut || false,
++    )
++}
++
++fn refine_coord_desc_for_allowed_rotation_with_control(
++    start: (DTransformation, SampleEval),
++    evaluator: &mut impl SampleEvaluator,
++    cd_config: CDConfig,
++    allowed_rotation: &RotationRange,
++    rng: &mut impl Rng,
++    should_stop: &mut dyn FnMut() -> bool,
++) -> (DTransformation, SampleEval) {
+     match nearest_rotation_anchor(allowed_rotation, start.0.rotation()) {
+-        Some(anchor) => refine_coord_desc_around_rotation(start, evaluator, cd_config, anchor, rng),
+-        None => refine_coord_desc(start, evaluator, cd_config, rng),
++        Some(anchor) => refine_coord_desc_around_rotation_with_control(
++            start,
++            evaluator,
++            cd_config,
++            anchor,
++            rng,
++            should_stop,
++        ),
++        None => refine_coord_desc_with_control(start, evaluator, cd_config, rng, should_stop),
+     }
+ }
+ 
+@@ -743,7 +775,10 @@
+ 
+         assert_eq!(actual, (Some(expected.0), Some(expected.1)));
+         assert_eq!(evaluator.n_evals(), expected_evaluator.n_evals());
+-        assert_eq!(polls, 2, "each final refinement must be stoppable");
++        assert!(
++            polls > 2,
++            "cancellation must also be polled inside each refinement"
++        );
+     }
+ 
+     #[test]
+@@ -773,12 +808,17 @@
+ 
+         let mut expected_evaluator = PreferOrigin::default();
+         let mut expected_rng = Xoshiro256PlusPlus::seed_from_u64(17);
+-        let expected_best = refine_coord_desc_for_allowed_rotation(
++        let mut first_polls = 0;
++        let expected_best = refine_coord_desc_for_allowed_rotation_with_control(
+             selected,
+             &mut expected_evaluator,
+             config,
+             &allowed,
+             &mut expected_rng,
++            &mut || {
++                first_polls += 1;
++                false
++            },
+         );
+ 
+         let mut evaluator = PreferOrigin::default();
+@@ -786,7 +826,7 @@
+         let mut polls = 0;
+         let mut stop_before_second = || {
+             polls += 1;
+-            polls >= 2
++            polls >= first_polls + 2
+         };
+         let (best, second_eval) = final_refine_candidates(
+             Some(selected),
+@@ -803,7 +843,7 @@
+         assert_eq!(best, Some(expected_best));
+         assert_eq!(second_eval, None);
+         assert_eq!(evaluator.n_evals(), expected_evaluator.n_evals());
+-        assert_eq!(polls, 2);
++        assert_eq!(polls, first_polls + 2);
+     }
+ 
+     #[test]
+@@ -845,7 +885,31 @@
+         assert_eq!(best, Some(expected_best));
+         assert_eq!(second_eval, Some(second.1));
+         assert_eq!(evaluator.n_evals(), expected_evaluator.n_evals());
+-        assert_eq!(polls, 1);
++        assert!(polls > 1, "ordinary refinement must poll inside CD");
++    }
++
++    #[test]
++    fn stop_inside_first_refinement_returns_its_best_without_a_mixed_regret() {
++        let mut evaluator = PreferOrigin::default();
++        let mut rng = Xoshiro256PlusPlus::seed_from_u64(17);
++        let mut polls = 0;
++        let (best, second) = final_refine_candidates(
++            Some((DTransformation::new(0.0, (3.0, 1.0)), clear(10.0))),
++            Some((DTransformation::new(0.0, (-3.0, -1.0)), clear(10.0))),
++            true,
++            &mut evaluator,
++            translation_config(),
++            &RotationRange::Continuous,
++            0.25,
++            &mut rng,
++            &mut || {
++                polls += 1;
++                polls >= 4
++            },
++        );
++        assert_eq!(evaluator.n_evals(), 4);
++        assert!(best.unwrap().1 <= clear(10.0));
++        assert_eq!(second, None);
+     }
+ 
+     #[test]
+--- a/swarm-core/src/util/assertions.rs
++++ b/swarm-core/src/util/assertions.rs
+@@ -201,3 +201,32 @@
+ 
+     prob.strip_width() < 2.0 * (diameters_of_all_items)
+ }
++
++/// Match every locked copy by item id and exact public pose, independent of
++/// SlotMap keys or iteration order. Collision freedom alone cannot prove this.
++pub fn frozen_poses_preserved(
++    reference: &jagua_rs::probs::spp::entities::SPSolution,
++    candidate: &jagua_rs::probs::spp::entities::SPSolution,
++    frozen: &[bool],
++) -> bool {
++    let signature = |sol: &jagua_rs::probs::spp::entities::SPSolution| {
++        let mut poses: Vec<_> = sol
++            .layout_snapshot
++            .placed_items
++            .values()
++            .filter(|p| frozen.get(p.item_id).copied().unwrap_or(false))
++            .map(|p| {
++                let (x, y) = p.d_transf.translation();
++                (
++                    p.item_id,
++                    p.d_transf.rotation().to_bits(),
++                    x.to_bits(),
++                    y.to_bits(),
++                )
++            })
++            .collect();
++        poses.sort_unstable();
++        poses
++    };
++    signature(reference) == signature(candidate)
++}
+--- a/swarm-core/tests/stop_latency.rs
++++ b/swarm-core/tests/stop_latency.rs
+@@ -226,11 +226,10 @@
+     );
+ }
+ 
+-/// **폴리시 단계 자체의 정지 상한.** LP 풀이는 솔버 안에서 플래그를 폴링하지 못하므로
+-/// 한 번의 풀이 시간 제한(`LpSolverConfig::time_limit_ms`, 기본 5s)이 곧 상한이다.
+-/// 그 위로 넘어가면 LP 밖의 어떤 루프가 플래그를 안 보고 있다는 뜻이다.
++/// Microlp resumes in short slices and movement batches poll the stop flag.
++/// Check the same cancellation envelope as Explore/Reclaim on this fixture.
+ #[test]
+-fn polish_stops_within_one_lp_solve() {
++fn polish_stops_promptly() {
+     let instance = load("shirts");
+     let c = DEFAULT_SWARM_CONFIG;
+     let seed = LBFBuilder::new(
+@@ -281,10 +280,10 @@
+     };
+     let latency = returned_at.duration_since(requested);
+     println!("polish stop latency: {:.0} ms", latency.as_secs_f32() * 1000.0);
+-    let lp_bound = Duration::from_millis(c.lp_solver.time_limit_ms.max(1) + 1000);
++    let lp_bound = Duration::from_millis(1500);
+     assert!(
+         latency < lp_bound,
+-        "polish stop took {:.0} ms — LP 한 번의 제한({:?})을 넘었다. LP 밖의 루프가 플래그를 안 본다",
++        "polish stop took {:.0} ms — 중단 응답 기준({:?})을 넘었다",
+         latency.as_secs_f32() * 1000.0,
+         lp_bound
+     );
+--- a/src/ffi_step.rs
++++ b/src/ffi_step.rs
+@@ -221,6 +221,7 @@
+ /// Cancellation is one-shot for a handle: once requested it remains requested until the handle is
+ /// freed.
+ struct HandleLifecycle {
++    run_control: Arc<swarm_core::config::runtime::RunControl>,
+     stop_requested: Arc<AtomicBool>,
+     state: Mutex<LifecycleState>,
+     changed: Condvar,
+@@ -229,6 +230,7 @@
+ impl HandleLifecycle {
+     fn new() -> Self {
+         Self {
++            run_control: swarm_core::config::runtime::RunControl::from_defaults(),
+             stop_requested: Arc::new(AtomicBool::new(false)),
+             state: Mutex::new(LifecycleState {
+                 status: LifecycleStatus::Open,
+@@ -731,6 +733,26 @@
+             }
+         }
+     }
++}
++
++fn certify_legacy_candidate_with_frozen(
++    instance: &SPInstance,
++    candidate: SPSolution,
++    fallback: &SPSolution,
++    phase_name: &str,
++    frozen_ids: &[usize],
++) -> Result<SPSolution, String> {
++    let mut mask = vec![false; instance.items.len()];
++    for &id in frozen_ids {
++        if let Some(value) = mask.get_mut(id) {
++            *value = true;
++        }
++    }
++    if !crate::util::assertions::frozen_poses_preserved(fallback, &candidate, &mask) {
++        log::warn!("[{phase_name}] rejected candidate that moved a frozen item");
++        return certify_legacy_candidate(instance, fallback.clone(), fallback, phase_name);
++    }
++    certify_legacy_candidate(instance, candidate, fallback, phase_name)
+ }
+ 
+ fn retain_exact_solution(
+@@ -1098,9 +1120,14 @@
+                 };
+             }
+             let (ext_inst, ext_sol) = io::read_spp_input(input_p).ok()?;
+-            build_handle(ext_inst, ext_sol, config, callback_options, initial_config, unsafe {
+-                parse_hints(hints, hint_count)
+-            })
++            build_handle(
++                ext_inst,
++                ext_sol,
++                config,
++                callback_options,
++                initial_config,
++                unsafe { parse_hints(hints, hint_count) },
++            )
+         },
+     ));
+     match run {
+@@ -1175,9 +1202,14 @@
+                     (inst, None)
+                 }
+             };
+-            build_handle(ext_inst, ext_sol, config, callback_options, initial_config, unsafe {
+-                parse_hints(hints, hint_count)
+-            })
++            build_handle(
++                ext_inst,
++                ext_sol,
++                config,
++                callback_options,
++                initial_config,
++                unsafe { parse_hints(hints, hint_count) },
++            )
+         },
+     ));
+     match run {
+@@ -1746,20 +1778,43 @@
+         .construct()
+         .prob
+     };
+-    let use_column_draft = config.refplace.enabled && config.refplace.column_draft
+-        && !requested_input_seed && frozen_placements.is_empty();
++    let use_column_draft = config.refplace.enabled
++        && config.refplace.column_draft
++        && !requested_input_seed
++        && frozen_placements.is_empty();
+     let mut has_column_draft = false;
+     let mut prob = if use_column_draft {
+-        match swarm_core::refplace::columns::build_column_draft(&instance, swarm_core::refplace::columns::ColumnDraftConfig { preserve_input_contour: config.simplify_max_deviation_mm.is_some(), ..Default::default() }) {
++        match swarm_core::refplace::columns::build_column_draft(
++            &instance,
++            swarm_core::refplace::columns::ColumnDraftConfig {
++                preserve_input_contour: config.simplify_max_deviation_mm.is_some(),
++                ..Default::default()
++            },
++        ) {
+             Ok((solution, report)) => {
+                 has_column_draft = true;
+-                log::info!("[INIT] Column Draft: {} pieces, {} columns, width {:.3}, density {:.2}%, {} ms, completion {}, NFP failures {}, overlap {:.3}mm, first IDs {:?}",
+-                    report.placements.len(), report.columns, report.width, report.density * 100.0,
+-                    report.elapsed_ms, report.budget_exhausted, report.nfp_failures,
++                log::info!(
++                    "[INIT] Column Draft: {} pieces, {} columns, width {:.3}, density {:.2}%, {} ms, completion {}, NFP failures {}, overlap {:.3}mm, first IDs {:?}",
++                    report.placements.len(),
++                    report.columns,
++                    report.width,
++                    report.density * 100.0,
++                    report.elapsed_ms,
++                    report.budget_exhausted,
++                    report.nfp_failures,
+                     (-config.min_item_separation.unwrap_or(0.0)).max(0.0),
+-                    report.placements.iter().take(12).map(|p| p.item_id).collect::<Vec<_>>());
++                    report
++                        .placements
++                        .iter()
++                        .take(12)
++                        .map(|p| p.item_id)
++                        .collect::<Vec<_>>()
++                );
+                 if !report.nfp_failure_examples.is_empty() {
+-                    log::info!("[INIT] Draft rejected NFP proposal examples: {:?}", report.nfp_failure_examples);
++                    log::info!(
++                        "[INIT] Draft rejected NFP proposal examples: {:?}",
++                        report.nfp_failure_examples
++                    );
+                 }
+                 let mut drafted = SPProblem::new(instance.clone());
+                 drafted.restore(&solution);
+@@ -1772,7 +1827,9 @@
+         }
+     } else {
+         if config.refplace.enabled && config.refplace.column_draft {
+-            log::info!("[INIT] preserving supplied/frozen placements; Column Draft applies to fresh layouts");
++            log::info!(
++                "[INIT] preserving supplied/frozen placements; Column Draft applies to fresh layouts"
++            );
+         }
+         construct(start_prob)
+     };
+@@ -1787,7 +1844,11 @@
+     // 이 엔진이 도는지조차 확인할 수 없다.
+     //
+     // 실패하면 조용히 기존 배치를 유지한다. 실험 스위치가 실행을 막으면 안 된다.
+-    if config.refplace.enabled && !config.refplace.column_draft && !requested_input_seed && frozen_placements.is_empty() {
++    if config.refplace.enabled
++        && !config.refplace.column_draft
++        && !requested_input_seed
++        && frozen_placements.is_empty()
++    {
+         let params = swarm_core::refplace::RefPlaceParams::default();
+         let before = prob.strip_width();
+         match swarm_core::refplace::build_reference_nest(&instance, &params, None) {
+@@ -1818,7 +1879,11 @@
+     // 있어서 WPF 에서 NFP 를 켜도 초기 배치가 전혀 바뀌지 않았다.
+     //
+     // 실패하거나 더 넓으면 조용히 기존 LBF 결과를 유지한다 — 시드는 어디까지나 보조다.
+-    if config.nfp_lbf.enabled && !use_column_draft && !requested_input_seed && frozen_placements.is_empty() {
++    if config.nfp_lbf.enabled
++        && !use_column_draft
++        && !requested_input_seed
++        && frozen_placements.is_empty()
++    {
+         let nfp_cfg = config.nfp_lbf.to_config(config.nfp_strategy);
+         // `construct` 클로저가 `rng` 를 가변 대여 중이므로 여기서는 새 스트림을 판다.
+         // 시드 생성은 결정론적이어야 하니 고정 파생 상수를 쓴다.
+@@ -1948,7 +2013,10 @@
+         engine: Mutex::new(HandleEngine::Legacy(legacy)),
+         lifecycle: HandleLifecycle::new(),
+     });
+-    log::info!("[INIT] ready for preview: total {} ms including import, placement and validation", init_started.elapsed().as_millis());
++    log::info!(
++        "[INIT] ready for preview: total {} ms including import, placement and validation",
++        init_started.elapsed().as_millis()
++    );
+     Some(Box::into_raw(handle))
+ }
+ 
+@@ -1971,6 +2039,7 @@
+ 
+     clear_last_error();
+     let handle = unsafe { &*handle };
++    let _run_scope = swarm_core::config::runtime::enter(handle.lifecycle.run_control.clone());
+     let Some(_phase_call) = handle.lifecycle.begin_phase() else {
+         set_last_error(
+             3000,
+@@ -2192,6 +2261,7 @@
+ 
+     clear_last_error();
+     let handle = unsafe { &*handle };
++    let _run_scope = swarm_core::config::runtime::enter(handle.lifecycle.run_control.clone());
+     let Some(_phase_call) = handle.lifecycle.begin_phase() else {
+         set_last_error(
+             3000,
+@@ -2228,9 +2298,11 @@
+             let solution_clock = Rc::clone(&last_emit);
+             let latest_safe = Rc::new(RefCell::new(ExactSolutionCache::default()));
+             let safe_solution = Rc::clone(&latest_safe);
++            let first_preview = Cell::new(true);
+             let mut on_all_items_solution =
+                 |report: ReportType, instance: &SPInstance, solution: &SPSolution| {
+-                    let interval_due = solution_clock.get().elapsed() >= progress_callback_interval;
++                    let interval_due = first_preview.get()
++                        || solution_clock.get().elapsed() >= progress_callback_interval;
+                     retain_exact_solution(
+                         &safe_solution,
+                         &report,
+@@ -2252,6 +2324,7 @@
+                     ) {
+                         return;
+                     }
++                    first_preview.set(false);
+                     solution_clock.set(Instant::now());
+                 };
+             if callback.is_some() {
+@@ -2370,7 +2443,13 @@
+             .last()
+             .cloned()
+             .unwrap_or_else(|| fallback.clone());
+-        let committed = certify_legacy_candidate(&h.instance, candidate, &fallback, "EXPL")?;
++        let committed = certify_legacy_candidate_with_frozen(
++            &h.instance,
++            candidate,
++            &fallback,
++            "EXPL",
++            &h.frozen_item_ids,
++        )?;
+         sep.prob.restore(&committed);
+         if let Some(callback) = h.solution_callback {
+             report_legacy_solution(
+@@ -2415,6 +2494,7 @@
+ 
+     clear_last_error();
+     let handle = unsafe { &*handle };
++    let _run_scope = swarm_core::config::runtime::enter(handle.lifecycle.run_control.clone());
+     let Some(_phase_call) = handle.lifecycle.begin_phase() else {
+         set_last_error(
+             3000,
+@@ -2451,9 +2531,11 @@
+             let solution_clock = Rc::clone(&last_emit);
+             let latest_safe = Rc::new(RefCell::new(ExactSolutionCache::default()));
+             let safe_solution = Rc::clone(&latest_safe);
++            let first_preview = Cell::new(true);
+             let mut on_all_items_solution =
+                 |report: ReportType, instance: &SPInstance, solution: &SPSolution| {
+-                    let interval_due = solution_clock.get().elapsed() >= progress_callback_interval;
++                    let interval_due = first_preview.get()
++                        || solution_clock.get().elapsed() >= progress_callback_interval;
+                     retain_exact_solution(
+                         &safe_solution,
+                         &report,
+@@ -2475,6 +2557,7 @@
+                     ) {
+                         return;
+                     }
++                    first_preview.set(false);
+                     solution_clock.set(Instant::now());
+                 };
+             if callback.is_some() {
+@@ -2582,10 +2665,13 @@
+                 &h.cmpr_config,
+             )
+         };
+-        let committed = certify_legacy_candidate(&h.instance, cmpr_sol, &start_sol, "CMPR")?;
+-        if sep.prob.strip_width() != committed.strip_width() {
+-            sep.change_strip_width(committed.strip_width(), None);
+-        }
++        let committed = certify_legacy_candidate_with_frozen(
++            &h.instance,
++            cmpr_sol,
++            &start_sol,
++            "CMPR",
++            &h.frozen_item_ids,
++        )?;
+         sep.rollback(&committed, None);
+         if let Some(callback) = h.solution_callback {
+             report_legacy_solution(
+@@ -2634,6 +2720,7 @@
+ 
+     clear_last_error();
+     let handle = unsafe { &*handle };
++    let _run_scope = swarm_core::config::runtime::enter(handle.lifecycle.run_control.clone());
+     let Some(_phase_call) = handle.lifecycle.begin_phase() else {
+         set_last_error(
+             3000,
+@@ -2673,9 +2760,11 @@
+             let solution_clock = Rc::clone(&last_emit);
+             let latest_safe = Rc::new(RefCell::new(ExactSolutionCache::default()));
+             let safe_solution = Rc::clone(&latest_safe);
++            let first_preview = Cell::new(true);
+             let mut on_all_items_solution =
+                 |report: ReportType, instance: &SPInstance, solution: &SPSolution| {
+-                    let interval_due = solution_clock.get().elapsed() >= progress_callback_interval;
++                    let interval_due = first_preview.get()
++                        || solution_clock.get().elapsed() >= progress_callback_interval;
+                     retain_exact_solution(
+                         &safe_solution,
+                         &report,
+@@ -2697,6 +2786,7 @@
+                     ) {
+                         return;
+                     }
++                    first_preview.set(false);
+                     solution_clock.set(Instant::now());
+                 };
+             if callback.is_some() {
+@@ -2802,7 +2892,13 @@
+                 &h.lp_solver,
+             )
+         };
+-        let committed = certify_legacy_candidate(&h.instance, plsh_sol, &cmpr_sol, "PLSH")?;
++        let committed = certify_legacy_candidate_with_frozen(
++            &h.instance,
++            plsh_sol,
++            &cmpr_sol,
++            "PLSH",
++            &h.frozen_item_ids,
++        )?;
+ 
+         // ── 잔여 예산 회수 ──
+         //
+@@ -2830,14 +2926,17 @@
+                 );
+                 // 회수 결과도 인증을 통과해야 한다. 통과 못 하면 인증된 직전 해로
+                 // 되돌아간다 — 회수가 배치를 깨뜨릴 수는 없다.
+-                certify_legacy_candidate(&h.instance, reclaimed, &cmpr_sol, "RECLAIM")?
++                certify_legacy_candidate_with_frozen(
++                    &h.instance,
++                    reclaimed,
++                    &cmpr_sol,
++                    "RECLAIM",
++                    &h.frozen_item_ids,
++                )?
+             }
+             _ => committed,
+         };
+ 
+-        if sep.prob.strip_width() != committed.strip_width() {
+-            sep.change_strip_width(committed.strip_width(), None);
+-        }
+         sep.rollback(&committed, None);
+         if let Some(callback) = h.solution_callback {
+             report_legacy_solution(
+@@ -2885,6 +2984,7 @@
+ 
+     clear_last_error();
+     let handle = unsafe { &*handle };
++    let _run_scope = swarm_core::config::runtime::enter(handle.lifecycle.run_control.clone());
+     let Some(_phase_call) = handle.lifecycle.begin_phase() else {
+         set_last_error(
+             3000,
+@@ -2981,7 +3081,9 @@
+                             solution,
+                             interval_due || new_stage,
+                         );
+-                        if callback.is_none() || !interval_due {
++                        // A new stage must publish its certified baseline even if the
++                        // previous stage emitted less than one throttle interval ago.
++                        if callback.is_none() || !(interval_due || new_stage) {
+                             return;
+                         }
+                         let report_type = match stage {
+@@ -3059,11 +3161,12 @@
+                 crate::structure::pipeline::solution_validation_error(&instance, solution).is_none()
+             })
+             .cloned();
+-        let initial_solution = if h.has_input_seed || h.has_column_draft || !h.frozen_item_ids.is_empty() {
+-            h.solution.clone()
+-        } else {
+-            None
+-        };
++        let initial_solution =
++            if h.has_input_seed || h.has_column_draft || !h.frozen_item_ids.is_empty() {
++                h.solution.clone()
++            } else {
++                None
++            };
+         let frozen_item_ids = h.frozen_item_ids.clone();
+         let expl_config = h.expl_config;
+         let cmpr_config = h.cmpr_config;
+@@ -3611,39 +3714,54 @@
+     }
+ }
+ 
+-/// 탐색(Exploration) 단계의 폭 축소 스텝을 **실행 중에** 재설정한다.
+-///
+-/// `swarm_explore_phase`가 도는 도중에 호출해도 된다. 다음 축소 시점부터 반영되며,
+-/// 진행 중인 separation은 중단 없이 끝까지 간다.
+-///
+-/// # 인자
+-/// * `step` — 현재 폭 대비 축소 비율. 유효 범위는 `0.0 < step < 1.0` (예: `0.001` = 0.1%).
+-///
+-/// # 반환
+-/// * `1` — 적용됨
+-/// * `0` — 값이 범위 밖이거나 비유한이라 **아무것도 바꾸지 않았음**
+-///
+-/// 설정은 프로세스 전역이다. 핸들을 받지 않는 이유도 그래서다.
+-/// 되돌리려면 [`swarm_clear_shrink_step`]을 호출한다.
++/// Legacy process default for subsequently created handles. Does not change
++/// active runs. Use swarm_set_handle_shrink_step for live control.
+ #[unsafe(no_mangle)]
+ pub extern "C" fn swarm_set_shrink_step(step: f32) -> i32 {
+     i32::from(swarm_core::config::runtime::set_shrink_step(step))
+ }
+-
+-/// 실행 중 재설정한 축소 스텝을 해제하고 설정 파일 값으로 되돌린다.
+ #[unsafe(no_mangle)]
+ pub extern "C" fn swarm_clear_shrink_step() {
+     swarm_core::config::runtime::clear_shrink_step();
+ }
+-
+-/// 현재 적용 중인 축소 스텝 오버라이드를 읽는다.
+-///
+-/// # 반환
+-/// * `> 0` — 그 값이 적용 중
+-/// * `-1` — 오버라이드 없음 (설정 파일 값이 그대로 쓰인다)
+ #[unsafe(no_mangle)]
+ pub extern "C" fn swarm_get_shrink_step() -> f32 {
+     swarm_core::config::runtime::shrink_step_override().unwrap_or(-1.0)
++}
++
++/// Updates only this handle; callable while its phase owns the engine lock.
++#[unsafe(no_mangle)]
++pub extern "C" fn swarm_set_handle_shrink_step(
++    handle: *const SwarmStepHandle,
++    step: f32,
++) -> i32 {
++    let Some(handle) = (unsafe { handle.as_ref() }) else {
++        return 0;
++    };
++    let Some(_call) = handle.lifecycle.begin_call() else {
++        return 0;
++    };
++    i32::from(handle.lifecycle.run_control.set_shrink_step(step))
++}
++#[unsafe(no_mangle)]
++pub extern "C" fn swarm_clear_handle_shrink_step(handle: *const SwarmStepHandle) {
++    let Some(handle) = (unsafe { handle.as_ref() }) else {
++        return;
++    };
++    let Some(_call) = handle.lifecycle.begin_call() else {
++        return;
++    };
++    handle.lifecycle.run_control.clear_shrink_step();
++}
++#[unsafe(no_mangle)]
++pub extern "C" fn swarm_get_handle_shrink_step(handle: *const SwarmStepHandle) -> f32 {
++    let Some(handle) = (unsafe { handle.as_ref() }) else {
++        return -1.0;
++    };
++    let Some(_call) = handle.lifecycle.begin_call() else {
++        return -1.0;
++    };
++    handle.lifecycle.run_control.shrink_step().unwrap_or(-1.0)
+ }
+ 
+ /// Read the current stop flag state (non-zero = stop requested).
+@@ -3802,9 +3920,9 @@
+ 
+ #[cfg(test)]
+ mod callback_diagnostics_tests {
+-    use jagua_rs::io::import::Importer;
+     use super::*;
+     use jagua_rs::geometry::DTransformation;
++    use jagua_rs::io::import::Importer;
+     use jagua_rs::probs::spp::entities::SPPlacement;
+ 
+     #[cfg(feature = "structure-first")]
+@@ -4020,7 +4138,10 @@
+         c_cfg.nfp_strategy2.reflow_rounds = 5;
+         let cfg = crate::ffi::build_config(&c_cfg);
+         assert!(cfg.nfp_strategy.accretion, "⑧ 누적 배치가 전달되지 않았다");
+-        assert!(cfg.nfp_strategy.tail_reflow, "⑨ 꼬리 회수가 전달되지 않았다");
++        assert!(
++            cfg.nfp_strategy.tail_reflow,
++            "⑨ 꼬리 회수가 전달되지 않았다"
++        );
+         assert_eq!(cfg.nfp_strategy.reflow_rounds, 5);
+         assert!(
+             cfg.nfp_strategy.any_enabled(),
+@@ -4094,16 +4215,40 @@
+         config.refplace.column_draft = true;
+         // The optional NFP-LBF seed must not overwrite an explicit Draft choice.
+         config.nfp_lbf.enabled = true;
+-        let handle = build_handle(rectangle_instance(), None, config,
+-            CallbackOptions { collect_loss: false, collect_collision_status: false },
+-            crate::ffi::InitialPlacementSettings::default(), Vec::new()).unwrap();
++        let handle = build_handle(
++            rectangle_instance(),
++            None,
++            config,
++            CallbackOptions {
++                collect_loss: false,
++                collect_collision_status: false,
++            },
++            crate::ffi::InitialPlacementSettings::default(),
++            Vec::new(),
++        )
++        .unwrap();
+         {
+             let state = unsafe { &*handle }.lock_engine();
+-            let HandleEngine::Legacy(h) = &*state else { panic!("legacy handle") };
+-            assert!(h.has_column_draft, "Draft failed or silently fell back to LBF");
+-            assert!(!h.has_input_seed, "generated Draft must not be labelled a user hint");
+-            let (expected, _) = swarm_core::refplace::columns::build_column_draft(&h.instance, Default::default()).unwrap();
+-            assert_eq!(h.solution.as_ref().unwrap().strip_width(), expected.strip_width());
++            let HandleEngine::Legacy(h) = &*state else {
++                panic!("legacy handle")
++            };
++            assert!(
++                h.has_column_draft,
++                "Draft failed or silently fell back to LBF"
++            );
++            assert!(
++                !h.has_input_seed,
++                "generated Draft must not be labelled a user hint"
++            );
++            let (expected, _) = swarm_core::refplace::columns::build_column_draft(
++                &h.instance,
++                Default::default(),
++            )
++            .unwrap();
++            assert_eq!(
++                h.solution.as_ref().unwrap().strip_width(),
++                expected.strip_width()
++            );
+         }
+         swarm_free(handle);
+     }
+@@ -4363,7 +4508,10 @@
+         let (instance, solution) = unsafe { legacy_solution(handle) };
+ 
+         let nominal = instance.base_strip.fixed_height;
+-        assert!((nominal - 200.0).abs() < 1e-6, "픽스처의 공칭 높이가 바뀌었다 ({nominal})");
++        assert!(
++            (nominal - 200.0).abs() < 1e-6,
++            "픽스처의 공칭 높이가 바뀌었다 ({nominal})"
++        );
+ 
+         let bbox = solution.layout_snapshot.container.outer_cd.bbox;
+         let shrank = nominal - (bbox.y_max - bbox.y_min);
+@@ -4372,7 +4520,11 @@
+             "컨테이너가 {shrank}mm 줄었다 — {OVERLAP}mm 여야 한다. \
+ 자라고 있으면(음수) `import_spp_instance` 를 안 거치는 경로가 남아 있다는 뜻이다"
+         );
+-        assert!(bbox.y_min > 0.0, "컨테이너 아래 경계가 {} 다 — 0 위여야 한다", bbox.y_min);
++        assert!(
++            bbox.y_min > 0.0,
++            "컨테이너 아래 경계가 {} 다 — 0 위여야 한다",
++            bbox.y_min
++        );
+ 
+         swarm_free(handle);
+     }
+@@ -4405,7 +4557,15 @@
+             "fixture must prove that simplification actually removed vertices"
+         );
+ 
+-        let handle = build_handle(ext, None, config, DEFAULT_CALLBACK_OPTIONS, crate::ffi::InitialPlacementSettings::default(), vec![]).unwrap();
++        let handle = build_handle(
++            ext,
++            None,
++            config,
++            DEFAULT_CALLBACK_OPTIONS,
++            crate::ffi::InitialPlacementSettings::default(),
++            vec![],
++        )
++        .unwrap();
+         let (actual, _) = unsafe { legacy_solution(handle) };
+         assert_eq!(
+             actual.item(0).shape_cd.n_vertices(),
+@@ -5149,6 +5309,78 @@
+     }
+ 
+     #[test]
++    fn handle_shrink_updates_are_isolated_and_do_not_require_the_engine_lock() {
++        let make = || {
++            build_handle(
++                rectangle_instance(),
++                None,
++                zero_time_phase_config(),
++                DEFAULT_CALLBACK_OPTIONS,
++                crate::ffi::InitialPlacementSettings::default(),
++                vec![],
++            )
++            .unwrap()
++        };
++        let a = make();
++        let b = make();
++        assert_eq!(swarm_set_handle_shrink_step(a, 0.02), 1);
++        assert_eq!(swarm_set_handle_shrink_step(b, 0.04), 1);
++        {
++            let handle = unsafe { &*a };
++            let _engine = handle.lock_engine();
++            let _scope = swarm_core::config::runtime::enter(handle.lifecycle.run_control.clone());
++            assert_eq!(swarm_set_handle_shrink_step(a, 0.03), 1);
++            assert_eq!(
++                swarm_core::config::runtime::effective_shrink_step(0.001),
++                0.03
++            );
++            assert_eq!(swarm_get_handle_shrink_step(b), 0.04);
++            assert_eq!(swarm_set_handle_shrink_step(a, f32::NAN), 0);
++            assert_eq!(swarm_get_handle_shrink_step(a), 0.03);
++            swarm_clear_handle_shrink_step(a);
++            assert_eq!(
++                swarm_core::config::runtime::effective_shrink_step(0.001),
++                0.001
++            );
++        }
++        assert_eq!(swarm_set_handle_shrink_step(std::ptr::null(), 0.1), 0);
++        assert_eq!(swarm_get_handle_shrink_step(std::ptr::null()), -1.0);
++        swarm_free(a);
++        swarm_free(b);
++    }
++
++    #[test]
++    fn frozen_certification_rejects_an_exact_but_moved_lock() {
++        let instance = internal_instance();
++        let mut problem = hinted_problem(&[hint(0, true, 5.0, 5.0), hint(1, false, 20.0, 5.0)]);
++        let fallback = problem.save();
++        let key = problem
++            .layout
++            .placed_items
++            .iter()
++            .find(|(_, p)| p.item_id == 0)
++            .unwrap()
++            .0;
++        problem.remove_item(key);
++        problem.place_item(SPPlacement {
++            item_id: 0,
++            d_transf: DTransformation::new(0.0, (8.0, 5.0)),
++        });
++        let candidate = problem.save();
++        assert!(
++            crate::structure::pipeline::solution_validation_error(&instance, &candidate).is_none()
++        );
++        let accepted =
++            certify_legacy_candidate_with_frozen(&instance, candidate, &fallback, "TEST", &[0])
++                .unwrap();
++        assert!(crate::util::assertions::frozen_poses_preserved(
++            &fallback,
++            &accepted,
++            &[true, false]
++        ));
++    }
++
++    #[test]
+     fn legacy_export_rejects_a_stale_invalid_transform() {
+         let handle = build_handle(
+             rectangle_instance(),
+--- a/src/grouped_engine.rs
++++ b/src/grouped_engine.rs
+@@ -731,10 +731,14 @@
+             // between independent starts: each scheduler round gives every
+             // unfinished lane at most one start, and the pool limits the
+             // number of concurrently running lanes to `group_workers`.
++            let run_control = swarm_core::config::runtime::current_control();
+             let session_results = pool.install(|| {
+                 self.lanes
+                     .par_iter_mut()
+-                    .map(|lane| lane.begin_structure_p1(stop, p1_deadline))
++                    .map(|lane| {
++                        let _scope = swarm_core::config::runtime::enter(run_control.clone());
++                        lane.begin_structure_p1(stop, p1_deadline)
++                    })
+                     .collect::<Vec<_>>()
+             });
+             if stop.load(Ordering::Relaxed) {
+@@ -761,6 +765,7 @@
+                         .zip(sessions.par_iter_mut())
+                         .zip(completed.par_iter())
+                         .map(|((lane, session), is_completed)| {
++                            let _scope = swarm_core::config::runtime::enter(run_control.clone());
+                             if *is_completed {
+                                 return Ok(None);
+                             }
+@@ -1170,7 +1175,14 @@
+                 // public callback contract safe if a future initializer adds
+                 // another hinted path.
+                 if solution_validation_error(&lane.instance, &lane.solution).is_none() {
+-                    on_solution(ReportType::ExplFeas, &lane.instance, &lane.solution);
++                    let report = match phase {
++                        LanePhase::Compression
++                        | LanePhase::Polish
++                        | LanePhase::StructureCompression
++                        | LanePhase::StructureFinish => ReportType::CmprFeas,
++                        _ => ReportType::ExplFeas,
++                    };
++                    on_solution(report, &lane.instance, &lane.solution);
+                 }
+                 lane.run_slice_with_progress(phase, &term, budget, on_solution)?;
+             } else {
+@@ -1191,6 +1203,8 @@
+             .build()
+             .map_err(|e| format!("failed to build group lane pool: {e}"))?;
+ 
++        let run_control = swarm_core::config::runtime::current_control();
++
+         // A P4 cycle is one ruin/recreate + separation/slide + resumed
+         // Explore pipeline under one shared deadline. Running it once per
+         // scheduler quantum would accidentally multiply repair cycles and
+@@ -1200,6 +1214,7 @@
+                 self.lanes
+                     .par_iter_mut()
+                     .map(|lane| {
++                        let _scope = swarm_core::config::runtime::enter(run_control.clone());
+                         let term = SliceTerminator::until(stop, deadline);
+                         lane.run_slice(phase, &term, budget)
+                     })
+@@ -1244,6 +1259,7 @@
+                     .par_iter_mut()
+                     .zip(effective_slices.into_par_iter())
+                     .map(|(lane, effective_slice)| {
++                        let _scope = swarm_core::config::runtime::enter(run_control.clone());
+                         let term = SliceTerminator::new_capped(stop, effective_slice, deadline);
+                         (
+                             effective_slice,
+@@ -2287,9 +2303,6 @@
+             .cloned()
+             .unwrap_or(fallback);
+         self.remember_tracker(LanePhase::Exploration, &sep.ct);
+-        if sep.prob.strip_width() != committed.strip_width() {
+-            sep.change_strip_width(committed.strip_width(), None);
+-        }
+         sep.rollback(&committed, None);
+         self.solution = committed;
+         self.prob = sep.prob;
+@@ -2324,9 +2337,6 @@
+             log::warn!("[GROUPED:CMPR] rejected a non-exact lane candidate");
+             fallback
+         };
+-        if sep.prob.strip_width() != committed.strip_width() {
+-            sep.change_strip_width(committed.strip_width(), None);
+-        }
+         sep.rollback(&committed, None);
+         self.solution = committed;
+         self.prob = sep.prob;
+@@ -2360,9 +2370,6 @@
+             log::warn!("[GROUPED:PLSH] rejected a non-exact lane candidate");
+             fallback
+         };
+-        if sep.prob.strip_width() != committed.strip_width() {
+-            sep.change_strip_width(committed.strip_width(), None);
+-        }
+         sep.rollback(&committed, None);
+         self.solution = committed;
+         self.prob = sep.prob;
+@@ -2589,7 +2596,7 @@
+         import_config.narrow_concavity_cutoff_ratio,
+         import_config.simplify_max_deviation_mm,
+     )
+-        .map_err(|e| format!("failed to import region lane: {e}"))?;
++    .map_err(|e| format!("failed to import region lane: {e}"))?;
+ 
+     let group_specs = input
+         .place_groups
+--- /dev/null
++++ b/swarm-core/tests/parallel_optimization.rs
+@@ -0,0 +1,303 @@
++use jagua_rs::geometry::DTransformation;
++use jagua_rs::io::import::Importer;
++use jagua_rs::probs::spp::entities::{SPInstance, SPPlacement, SPProblem, SPSolution};
++use jagua_rs::probs::spp::io::ext_repr::ExtSPInstance;
++use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
++use swarm_core::config::DEFAULT_SWARM_CONFIG;
++use swarm_core::optimizer::separator::Separator;
++use swarm_core::structure::pipeline::solution_validation_error;
++use swarm_core::util::assertions::{frozen_poses_preserved, tracker_matches_layout};
++use swarm_core::util::terminator::{BasicTerminator, Terminator};
++use std::time::Duration;
++
++fn fixture(n: usize, depth: u8) -> (SPInstance, SPProblem) {
++    let items: Vec<_> = (0..n)
++        .map(|id| {
++            serde_json::json!({
++        "id":id,"demand":1,"allowed_orientations":[0.0],"shape":{
++            "type":"rectangle","data":{"x_min":0.0,"y_min":0.0,"width":4.0,"height":4.0}}})
++        })
++        .collect();
++    let external: ExtSPInstance = serde_json::from_value(serde_json::json!({
++        "name":"optimization-regression", "strip_height":12.0, "items":items}))
++    .unwrap();
++    let mut cfg = DEFAULT_SWARM_CONFIG;
++    cfg.cde_config.quadtree_depth = depth;
++    let importer = Importer::new(
++        cfg.cde_config,
++        cfg.poly_simpl_tolerance,
++        cfg.min_item_separation,
++        cfg.narrow_concavity_cutoff_ratio,
++    );
++    let instance = jagua_rs::probs::spp::io::import_instance(&importer, &external).unwrap();
++    let mut problem = SPProblem::new(instance.clone());
++    problem.change_strip_width(12.0 + n as f32 * 6.0);
++    for id in 0..n {
++        problem.place_item(SPPlacement {
++            item_id: id,
++            d_transf: DTransformation::new(0.0, (8.0 + id as f32 * 6.0, 5.0)),
++        });
++    }
++    assert!(solution_validation_error(&instance, &problem.save()).is_none());
++    (instance, problem)
++}
++fn separator(instance: SPInstance, problem: SPProblem, workers: usize) -> Separator {
++    let mut cfg = DEFAULT_SWARM_CONFIG.expl_cfg.separator_config;
++    cfg.n_workers = workers;
++    cfg.iter_no_imprv_limit = 8;
++    cfg.strike_limit = 1;
++    let mut sep = Separator::new(
++        instance,
++        problem,
++        Xoshiro256PlusPlus::seed_from_u64(17),
++        cfg,
++    );
++    sep.rng = Xoshiro256PlusPlus::seed_from_u64(101);
++    sep
++}
++fn poses(sol: &SPSolution) -> Vec<(usize, u32, u32, u32)> {
++    let mut out: Vec<_> = sol
++        .layout_snapshot
++        .placed_items
++        .values()
++        .map(|p| {
++            let (x, y) = p.d_transf.translation();
++            (
++                p.item_id,
++                p.d_transf.rotation().to_bits(),
++                x.to_bits(),
++                y.to_bits(),
++            )
++        })
++        .collect();
++    out.sort_unstable();
++    out
++}
++#[test]
++fn nfp_ordering_preserves_frozen_poses_with_and_without_quadtree() {
++    for depth in [0, 4] {
++        let (instance, mut problem) = fixture(2, depth);
++        let old = problem
++            .layout
++            .placed_items
++            .iter()
++            .find(|(_, p)| p.item_id == 0)
++            .unwrap()
++            .0;
++        problem.remove_item(old);
++        problem.change_strip_width(30.0);
++        problem.place_item(SPPlacement {
++            item_id: 0,
++            d_transf: DTransformation::new(0.0, (24.0, 5.0)),
++        });
++        let initial = problem.save();
++        let mut sep = separator(instance.clone(), problem, 1);
++        sep.freeze_items(&[0]);
++        let mut cfg = DEFAULT_SWARM_CONFIG.expl_cfg;
++        cfg.time_limit = Duration::from_millis(100);
++        let mut term = BasicTerminator::new();
++        term.new_timeout(cfg.time_limit);
++        let results = swarm_core::nfp_lbf::nfp_ordering_exploration_phase(
++            &instance,
++            &mut sep,
++            &mut None,
++            &term,
++            &cfg,
++            &DEFAULT_SWARM_CONFIG.nfp_lbf,
++        );
++        assert!(!results.is_empty());
++        for result in results {
++            assert!(frozen_poses_preserved(&initial, &result, &sep.frozen_mask));
++            assert!(solution_validation_error(&instance, &result).is_none());
++        }
++    }
++}
++#[test]
++fn cancelled_width_batch_restores_layout_and_tracker() {
++    let (instance, problem) = fixture(8, 4);
++    let initial = problem.save();
++    let mut sep = separator(instance, problem, 2);
++    let mut checks = 0;
++    assert!(!sep.change_strip_width_with_control(
++        initial.strip_width() * 0.95,
++        Some(0.0),
++        &mut || {
++            checks += 1;
++            checks >= 4
++        }
++    ));
++    assert_eq!(poses(&initial), poses(&sep.prob.save()));
++    assert_eq!(initial.strip_width(), sep.prob.strip_width());
++    assert!(tracker_matches_layout(&sep.ct, &sep.prob.layout));
++}
++#[test]
++fn rollback_installs_a_narrower_snapshot_without_shifting_a_frozen_item() {
++    let (instance, problem) = fixture(2, 4);
++    let mut sep = separator(instance.clone(), problem, 1);
++    sep.freeze_items(&[1]);
++    let wide = sep.prob.save();
++    sep.refit_strip();
++    let narrow = sep.prob.save();
++    assert!(narrow.strip_width() < wide.strip_width());
++    sep.rollback(&wide, None);
++    sep.rollback(&narrow, None);
++    assert_eq!(poses(&wide), poses(&sep.prob.save()));
++    assert!(solution_validation_error(&instance, &sep.prob.save()).is_none());
++}
++#[test]
++fn grouped_polish_translates_rigid_units_and_preserves_locks() {
++    use swarm_core::optimizer::place_groups::{PlaceGroupMember, PlaceGroupSpec, PlaceGroups};
++    let (instance, problem) = fixture(3, 4);
++    let initial = problem.save();
++    let mut sep = separator(instance.clone(), problem, 2);
++    let members = (1..3)
++        .map(|id| PlaceGroupMember {
++            item_id: id,
++            initial_transform: initial
++                .layout_snapshot
++                .placed_items
++                .values()
++                .find(|p| p.item_id == id)
++                .unwrap()
++                .d_transf,
++        })
++        .collect();
++    sep.set_place_groups(
++        PlaceGroups::new(&instance, vec![PlaceGroupSpec { id: 77, members }]).unwrap(),
++    )
++    .unwrap();
++    sep.freeze_items(&[0]);
++    let mut cfg = DEFAULT_SWARM_CONFIG.polish_cfg.clone();
++    cfg.reclaim.enabled = false;
++    let mut term = BasicTerminator::new();
++    term.new_timeout(Duration::from_secs(2));
++    let result = swarm_core::optimizer::polish::polish_phase_with_nfp(
++        &instance,
++        &mut sep,
++        &initial,
++        &mut None,
++        &term,
++        &cfg,
++        &DEFAULT_SWARM_CONFIG.nfp_integration,
++        &DEFAULT_SWARM_CONFIG.lp_solver,
++    );
++    assert!(frozen_poses_preserved(&initial, &result, &sep.frozen_mask));
++    assert!(solution_validation_error(&instance, &result).is_none());
++    assert!(result.strip_width() < initial.strip_width() - 0.1);
++    let dt = |id| {
++        result
++            .layout_snapshot
++            .placed_items
++            .values()
++            .find(|p| p.item_id == id)
++            .unwrap()
++            .d_transf
++    };
++    assert!((dt(2).translation().0 - dt(1).translation().0 - 6.0).abs() < 1e-4);
++    assert!((dt(2).translation().1 - dt(1).translation().1).abs() < 1e-4);
++    assert_eq!(dt(1).rotation(), dt(2).rotation());
++    assert!(tracker_matches_layout(&sep.ct, &sep.prob.layout));
++}
++#[cfg(any(feature = "adaptive", feature = "capmods"))]
++#[test]
++fn initial_regret_parallelism_is_reproducible_across_worker_counts() {
++    use swarm_core::optimizer::lns::{BandTabu, RuinStrategy, ruin_and_recreate};
++    let (instance, problem) = fixture(8, 4);
++    let initial = problem.save();
++    let cfg = swarm_core::config::RuinRecreateConfig {
++        period: 1,
++        band_fraction: 1.0,
++        max_items: 8,
++    };
++    let mut results = Vec::new();
++    for workers in [1, 2, 4] {
++        let mut restored = SPProblem::new(instance.clone());
++        restored.restore(&initial);
++        let mut sep = separator(instance.clone(), restored, workers);
++        let n = ruin_and_recreate(
++            &mut sep,
++            &cfg,
++            RuinStrategy::GapTarget,
++            &mut BandTabu::new(),
++            &BasicTerminator::new(),
++        );
++        assert!(n >= 4, "must exercise the parallel branch, got {n}");
++        assert!(tracker_matches_layout(&sep.ct, &sep.prob.layout));
++        results.push((poses(&sep.prob.save()), sep.ct.get_total_loss()));
++    }
++    assert_eq!(results[0], results[1]);
++    assert_eq!(results[0], results[2]);
++}
++
++#[test]
++fn disabled_reclaim_preserves_poses_width_and_rng() {
++    use rand::RngExt;
++    let (instance, problem) = fixture(2, 4);
++    let initial = problem.save();
++    let mut sep = separator(instance.clone(), problem, 1);
++    let mut expected_rng = sep.rng.clone();
++    let c = DEFAULT_SWARM_CONFIG;
++    let mut cfg = c.polish_cfg.reclaim;
++    cfg.enabled = false;
++    let (result, stats) = swarm_core::optimizer::reclaim::reclaim_leftover(
++        &instance,
++        &mut sep,
++        initial.clone(),
++        jagua_rs::Instant::now() + Duration::from_secs(1),
++        &cfg,
++        &c.cmpr_cfg,
++        &c.expl_cfg,
++        &c.polish_cfg,
++        &c.nfp_integration,
++        &c.escape,
++        &c.lp_solver,
++        &BasicTerminator::new(),
++    );
++    assert_eq!(poses(&initial), poses(&result));
++    assert_eq!(poses(&initial), poses(&sep.prob.save()));
++    assert_eq!(initial.strip_width(), sep.prob.strip_width());
++    assert_eq!(stats.cycles, 0);
++    assert_eq!(expected_rng.random::<u64>(), sep.rng.random::<u64>());
++}
++
++#[test]
++fn polish_retains_equal_width_improvement_when_a_frozen_item_sets_the_width() {
++    let (instance, mut problem) = fixture(3, 4);
++    problem.fit_strip();
++    let initial = problem.save();
++    let mut sep = separator(instance.clone(), problem, 1);
++    sep.freeze_items(&[2]);
++    let mut cfg = DEFAULT_SWARM_CONFIG.polish_cfg.clone();
++    cfg.lp.enabled = false;
++    cfg.hole_fill.enabled = false;
++    cfg.n_rounds = 1;
++    cfg.reclaim.enabled = false;
++    let result = swarm_core::optimizer::polish::polish_phase_with_nfp(
++        &instance,
++        &mut sep,
++        &initial,
++        &mut None,
++        &BasicTerminator::new(),
++        &cfg,
++        &DEFAULT_SWARM_CONFIG.nfp_integration,
++        &DEFAULT_SWARM_CONFIG.lp_solver,
++    );
++    assert_eq!(initial.strip_width(), result.strip_width());
++    let before = initial
++        .layout_snapshot
++        .placed_items
++        .values()
++        .find(|p| p.item_id == 0)
++        .unwrap()
++        .d_transf;
++    let after = result
++        .layout_snapshot
++        .placed_items
++        .values()
++        .find(|p| p.item_id == 0)
++        .unwrap()
++        .d_transf;
++    assert!(after.translation().0 < before.translation().0 - 0.1);
++    assert!(frozen_poses_preserved(&initial, &result, &sep.frozen_mask));
++    assert!(solution_validation_error(&instance, &result).is_none());
++}

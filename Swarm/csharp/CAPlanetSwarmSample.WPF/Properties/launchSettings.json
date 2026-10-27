@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "CAPlanetSwarmSample.WPF": {
+      "commandName": "Project",
+      "debugEngines": "managed,native"
+    }
+  }
+}

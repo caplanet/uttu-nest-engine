@@ -1,0 +1,1 @@
+{"_note":"band_full 을 1코어 1스레드로 — 같은 3코어를 시드 3개에 나눠 쓰고 최선을 취한다","exploration.separator.n_workers":1,"compression.separator.n_workers":1,"band_rearrange.post_shrink":1,"band_rearrange.full_band":1}

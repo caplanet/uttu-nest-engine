@@ -1,0 +1,12 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Folder Name="/Samples/">
+    <Project Path="csharp/CAPlanetSwarmSample.WPF/CAPlanetSwarmSample.WPF.csproj" Id="13ffa5ae-7961-49a3-a3d7-d3223204c910">
+      <Platform Solution="*|x64" Project="x64" />
+    </Project>
+  </Folder>
+
+</Solution>

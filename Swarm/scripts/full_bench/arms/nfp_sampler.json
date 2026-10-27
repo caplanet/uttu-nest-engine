@@ -1,0 +1,1 @@
+{"_note":"분리기의 후보 생성을 난수 샘플 대신 NFP 열거로. 측정된 병목(분리 1회 비용)을 직접 겨냥","nfp_integration.nfp_sampler":1}

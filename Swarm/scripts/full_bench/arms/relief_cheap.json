@@ -1,0 +1,1 @@
+{"_note":"폭 완화 복구를 싸고 잦게. 진동의 headroom/2 등비붕괴를 우회. shrink_step 은 0.004 로 고정해 relief 단독 효과를 분리","exploration.shrink_step":0.004,"width_relief.fail_threshold":2,"width_relief.step":0.002,"width_relief.max_ratio":0.008,"width_relief.max_rounds":4,"width_relief.strike_limit":1,"width_relief.round_budget_ms":1200}

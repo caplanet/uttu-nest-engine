@@ -1,0 +1,1382 @@
+--- a/swarm-core/src/escape/conflict_burst.rs
++++ b/swarm-core/src/escape/conflict_burst.rs
+@@ -540,7 +540,7 @@
+ fn container_conflicting(ct: &CollisionTracker, pk: PItemKey) -> bool {
+     ct.pk_idx_map
+         .get(pk)
+-        .map(|&row| ct.container_collisions[row].loss > 0.0)
++        .map(|&row| ct.container_collisions()[row].loss > 0.0)
+         .unwrap_or(false)
+ }
+ 
+@@ -548,7 +548,7 @@
+ ///
+ /// `pk_idx_map`은 단사이므로 이 역매핑은 잘 정의된다.
+ fn row_nodes(ct: &CollisionTracker, keys: &[PItemKey]) -> Vec<u32> {
+-    let size = ct.pair_collisions.size;
++    let size = ct.pair_collisions().size;
+     let mut nodes = vec![NO_NODE; size];
+     for (i, &pk) in keys.iter().enumerate() {
+         if let Some(&row) = ct.pk_idx_map.get(pk) {
+@@ -778,8 +778,8 @@
+     }
+ 
+     let nodes = row_nodes(ct, keys);
+-    let size = ct.pair_collisions.size;
+-    let data = &ct.pair_collisions.data;
++    let size = ct.pair_collisions().size;
++    let data = &ct.pair_collisions().data;
+     if data.len() != size * (size + 1) / 2 {
+         debug_assert!(false, "pair matrix size mismatch");
+         return (edges, deg);
+--- a/swarm-core/src/escape/guided.rs
++++ b/swarm-core/src/escape/guided.rs
+@@ -196,6 +196,8 @@
+             }
+         }
+ 
++        // Invalidate cached sums once for the whole weight update.
++        let pair_collisions = sep.ct.pair_collisions_mut();
+         for i in 0..size {
+             let Some(id_i) = idx_to_item[i] else { continue };
+             for j in (i + 1)..size {
+@@ -204,7 +206,7 @@
+                 if gw == GUIDED_WEIGHT_NEUTRAL {
+                     continue;
+                 }
+-                let entry = &mut sep.ct.pair_collisions[(i, j)];
++                let entry = &mut pair_collisions[(i, j)];
+                 let base = if entry.weight.is_finite() && entry.weight > 0.0 {
+                     entry.weight
+                 } else {
+--- a/swarm-core/src/eval/sep_evaluator.rs
++++ b/swarm-core/src/eval/sep_evaluator.rs
+@@ -4,11 +4,111 @@
+ };
+ use crate::quantify::tracker::CollisionTracker;
+ use jagua_rs::collision_detection::hazards::collector::HazardCollector;
++use jagua_rs::collision_detection::hazards::{HazKey, HazardEntity};
+ use jagua_rs::entities::Item;
+ use jagua_rs::entities::Layout;
+ use jagua_rs::entities::PItemKey;
+ use jagua_rs::geometry::DTransformation;
+ use jagua_rs::geometry::primitives::SPolygon;
++use slotmap::SecondaryMap;
++use std::cell::RefCell;
++
++/// Worker-local owned buffers. No layout, tracker or placement references survive
++/// a search, so the pool can also be reused after rollback and NFP fallback.
++#[derive(Default)]
++pub struct SeparationEvaluatorPool(RefCell<Option<SeparationBuffers>>);
++
++struct SeparationBuffers {
++    shape: SPolygon,
++    detected: SecondaryMap<HazKey, (HazardEntity, usize)>,
++    pending: Vec<HazKey>,
++    #[cfg(feature = "simd")]
++    poles: crate::quantify::simd::circles_soa::CirclesSoA,
++}
++
++pub struct PooledSeparationEvaluator<'a> {
++    evaluator: Option<SeparationEvaluator<'a>>,
++    pool: &'a SeparationEvaluatorPool,
++}
++
++impl<'a> PooledSeparationEvaluator<'a> {
++    pub fn new(
++        layout: &'a Layout,
++        item: &'a Item,
++        pk: PItemKey,
++        ct: &'a CollisionTracker,
++        pool: &'a SeparationEvaluatorPool,
++    ) -> Self {
++        let evaluator = match pool.0.borrow_mut().take() {
++            None => SeparationEvaluator::new(layout, item, pk, ct),
++            Some(mut buffers) => {
++                // SPolygon::transform_from assumes matching buffer dimensions
++                // and leaves invariant metadata untouched. Reset every field
++                // when switching items, retaining the large vertex allocation.
++                let SPolygon {
++                    vertices,
++                    bbox,
++                    area,
++                    diameter,
++                    poi,
++                    surrogate,
++                } = item.shape_cd.as_ref();
++                buffers.shape.vertices.clone_from(vertices);
++                buffers.shape.bbox = *bbox;
++                buffers.shape.area = *area;
++                buffers.shape.diameter = *diameter;
++                buffers.shape.poi = *poi;
++                buffers.shape.surrogate.clone_from(surrogate);
++                let collector = SpecializedHazardCollector::new_reusing(
++                    layout,
++                    ct,
++                    pk,
++                    buffers.detected,
++                    buffers.pending,
++                );
++                #[cfg(feature = "simd")]
++                let collector = {
++                    let mut collector = collector;
++                    collector.poles_soa = buffers.poles;
++                    collector
++                };
++                SeparationEvaluator {
++                    layout,
++                    item,
++                    collector,
++                    shape_buff: buffers.shape,
++                    n_evals: 0,
++                }
++            }
++        };
++        Self {
++            evaluator: Some(evaluator),
++            pool,
++        }
++    }
++}
++
++impl SampleEvaluator for PooledSeparationEvaluator<'_> {
++    fn evaluate_sample(&mut self, dt: DTransformation, bound: Option<SampleEval>) -> SampleEval {
++        self.evaluator.as_mut().unwrap().evaluate_sample(dt, bound)
++    }
++    fn n_evals(&self) -> usize {
++        self.evaluator.as_ref().unwrap().n_evals()
++    }
++}
++
++impl Drop for PooledSeparationEvaluator<'_> {
++    fn drop(&mut self) {
++        let evaluator = self.evaluator.take().unwrap();
++        *self.pool.0.borrow_mut() = Some(SeparationBuffers {
++            shape: evaluator.shape_buff,
++            detected: evaluator.collector.detected,
++            pending: evaluator.collector.pending,
++            #[cfg(feature = "simd")]
++            poles: evaluator.collector.poles_soa,
++        });
++    }
++}
+ 
+ pub struct SeparationEvaluator<'a> {
+     layout: &'a Layout,
+--- a/swarm-core/src/eval/specialized_jaguars_pipeline.rs
++++ b/swarm-core/src/eval/specialized_jaguars_pipeline.rs
+@@ -5,6 +5,8 @@
+ use crate::quantify::simd::circles_soa::CirclesSoA;
+ #[cfg(feature = "simd")]
+ use crate::quantify::simd::quantify_collision_poly_poly_simd;
++#[cfg(feature = "simd")]
++use crate::quantify::simd::quantify_collision_poly_poly_simd_bounded_by;
+ use crate::quantify::tracker::CollisionTracker;
+ use crate::util::assertions;
+ use crate::util::bit_reversal_iterator::BitReversalIterator;
+@@ -18,7 +20,7 @@
+ use jagua_rs::geometry::DTransformation;
+ use jagua_rs::geometry::geo_traits::TransformableFrom;
+ use jagua_rs::geometry::primitives::SPolygon;
+-use slotmap::SecondaryMap;
++use slotmap::{Key, SecondaryMap};
+ use std::f32::consts::PI;
+ 
+ /// Our specialized counterpart to [`CDEngine::collect_poly_collisions`] with early return:
+@@ -121,12 +123,32 @@
+     pub idx_counter: usize,
+     pub loss_cache: (usize, f32),
+     pub loss_bound: f32,
++    pub(crate) pending: Vec<HazKey>,
++    rejected: bool,
+     #[cfg(feature = "simd")]
+     pub poles_soa: CirclesSoA,
+ }
+ 
+ impl<'a> SpecializedHazardCollector<'a> {
+     pub fn new(layout: &'a Layout, ct: &'a CollisionTracker, current_pk: PItemKey) -> Self {
++        Self::new_reusing(
++            layout,
++            ct,
++            current_pk,
++            SecondaryMap::with_capacity(layout.placed_items.len() + 1),
++            Vec::new(),
++        )
++    }
++
++    pub(crate) fn new_reusing(
++        layout: &'a Layout,
++        ct: &'a CollisionTracker,
++        current_pk: PItemKey,
++        mut detected: SecondaryMap<HazKey, (HazardEntity, usize)>,
++        mut pending: Vec<HazKey>,
++    ) -> Self {
++        detected.clear();
++        pending.clear();
+         let current_haz_key = layout
+             .cde()
+             .haz_key_from_pi_key(current_pk)
+@@ -136,10 +158,12 @@
+             ct,
+             current_pk,
+             current_haz_key,
+-            detected: SecondaryMap::with_capacity(layout.placed_items.len() + 1),
++            detected,
+             idx_counter: 0,
+             loss_cache: (0, 0.0),
+             loss_bound: f32::INFINITY,
++            pending,
++            rejected: false,
+             #[cfg(feature = "simd")]
+             poles_soa: CirclesSoA::new(),
+         }
+@@ -150,6 +174,8 @@
+         self.idx_counter = 0;
+         self.loss_cache = (0, 0.0);
+         self.loss_bound = loss_bound;
++        self.pending.clear();
++        self.rejected = false;
+     }
+ 
+     pub fn iter_with_index(&self) -> impl Iterator<Item = &(HazardEntity, usize)> {
+@@ -161,14 +187,43 @@
+     }
+ 
+     pub fn loss(&mut self, shape: &SPolygon) -> f32 {
++        if self.rejected {
++            return f32::INFINITY;
++        }
+         let (cache_idx, cached_loss) = self.loss_cache;
+         if cache_idx < self.idx_counter {
+-            // additional hazards were detected, update the cache
+-            let extra_loss: f32 = self
+-                .iter_with_index()
+-                .filter(|(_, idx)| *idx >= cache_idx)
+-                .map(|(h, _)| self.calc_weighted_loss(h, shape))
+-                .sum();
++            // SecondaryMap iterates by slot index, not insertion order. Keep
++            // that exact order within each batch, without rescanning old slots.
++            self.pending
++                .sort_unstable_by_key(|key| key.data().as_ffi() as u32);
++            let mut extra_loss = 0.0;
++            for key in &self.pending {
++                let (hazard, _) = &self.detected[*key];
++                #[cfg(feature = "simd")]
++                if let HazardEntity::PlacedItem { pk: other_pk, .. } = hazard {
++                    let weight = self.ct.get_pair_weight(self.current_pk, *other_pk);
++                    if self.loss_bound.is_finite() && weight.is_finite() && weight > 0.0 {
++                        let hint = (self.loss_bound - cached_loss - extra_loss) / weight;
++                        let loss = quantify_collision_poly_poly_simd_bounded_by(
++                            &self.layout.placed_items[*other_pk].shape,
++                            shape,
++                            &self.poles_soa,
++                            hint,
++                            |loss| cached_loss + (extra_loss + loss * weight) > self.loss_bound,
++                        );
++                        let Some(loss) = loss else {
++                            // Only rejection is observable for an over-bound
++                            // sample; never cache a partial sum as an exact loss.
++                            self.rejected = true;
++                            return f32::INFINITY;
++                        };
++                        extra_loss += loss * weight;
++                        continue;
++                    }
++                }
++                extra_loss += self.calc_weighted_loss(hazard, shape);
++            }
++            self.pending.clear();
+             self.loss_cache = (self.idx_counter, cached_loss + extra_loss);
+         }
+         debug_assert!(approx_eq!(
+@@ -217,6 +272,7 @@
+     fn insert(&mut self, hkey: HazKey, entity: HazardEntity) {
+         debug_assert!(!self.contains_key(hkey));
+         self.detected.insert(hkey, (entity, self.idx_counter));
++        self.pending.push(hkey);
+         self.idx_counter += 1;
+     }
+ 
+@@ -225,9 +281,13 @@
+             .detected
+             .remove(hkey)
+             .expect("key should be present in the collector");
+-        if idx < self.loss_cache.0 {
++        self.pending.retain(|key| *key != hkey);
++        if idx < self.loss_cache.0 || self.rejected {
+             //wipe the cache if a hazard was removed that was in it
+             self.loss_cache = (0, 0.0);
++            self.rejected = false;
++            self.pending.clear();
++            self.pending.extend(self.detected.keys());
+         }
+     }
+ 
+--- a/swarm-core/src/optimizer/separator.rs
++++ b/swarm-core/src/optimizer/separator.rs
+@@ -18,6 +18,93 @@
+ use rayon::ThreadPool;
+ use rayon::iter::IntoParallelRefMutIterator;
+ use rayon::iter::ParallelIterator;
++
++#[cfg(test)]
++mod explore_code_tests {
++    use super::*;
++    use crate::config::DEFAULT_SWARM_CONFIG;
++    use crate::consts::LBF_SAMPLE_CONFIG;
++    use crate::optimizer::lbf::LBFBuilder;
++    use crate::util::{io::read_spp_input, terminator::BasicTerminator};
++    use jagua_rs::io::import::Importer;
++    use std::path::Path;
++
++    #[test]
++    fn winner_transfer_matches_snapshot_restore_across_iterations() {
++        let cfg = DEFAULT_SWARM_CONFIG;
++        let (ext, _) =
++            read_spp_input(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/input/fu.json"))
++                .unwrap();
++        let importer = Importer::new(
++            cfg.cde_config,
++            cfg.poly_simpl_tolerance,
++            cfg.min_item_separation,
++            cfg.narrow_concavity_cutoff_ratio,
++        );
++        let instance = jagua_rs::probs::spp::io::import_instance(&importer, &ext).unwrap();
++        let builder = LBFBuilder::new(
++            instance.clone(),
++            Xoshiro256PlusPlus::seed_from_u64(17),
++            LBF_SAMPLE_CONFIG,
++            cfg.lbf_x_multiplier,
++            cfg.lbf_y_multiplier,
++        )
++        .construct();
++        let mut actual = Separator::new(
++            instance.clone(),
++            builder.prob.clone(),
++            Xoshiro256PlusPlus::seed_from_u64(42),
++            cfg.expl_cfg.separator_config,
++        );
++        let mut reference = Separator::new(
++            instance,
++            builder.prob,
++            Xoshiro256PlusPlus::seed_from_u64(42),
++            cfg.expl_cfg.separator_config,
++        );
++        let term = BasicTerminator::new();
++        for _ in 0..12 {
++            if actual.ct.get_total_loss() == 0.0 {
++                let width = actual.prob.strip_width() * (1.0 - cfg.expl_cfg.shrink_step);
++                actual.change_strip_width(width, None);
++                reference.change_strip_width(width, None);
++            }
++            actual.move_items_multi(&term);
++            let master = reference.prob.save();
++            for worker in &mut reference.workers {
++                worker.load(&master, &reference.ct);
++                worker.move_items(&term);
++            }
++            let winner = reference
++                .workers
++                .iter()
++                .enumerate()
++                .min_by_key(|(_, w)| OrderedFloat(w.ct.get_total_weighted_loss()))
++                .unwrap()
++                .0;
++            reference
++                .prob
++                .restore(&reference.workers[winner].prob.save());
++            reference.ct.copy_from(&reference.workers[winner].ct);
++            assert_eq!(
++                actual.ct.get_total_loss().to_bits(),
++                reference.ct.get_total_loss().to_bits()
++            );
++            for (key, pi) in &actual.prob.layout.placed_items {
++                assert_eq!(
++                    pi.d_transf,
++                    reference.prob.layout.placed_items[key].d_transf
++                );
++            }
++            for (a, b) in actual.workers.iter().zip(&reference.workers) {
++                assert_eq!(a.rng.clone().random::<u64>(), b.rng.clone().random::<u64>());
++            }
++            assert!(tracker_matches_layout(&actual.ct, &actual.prob.layout));
++            actual.ct.update_weights();
++            reference.ct.update_weights();
++        }
++    }
++}
+ 
+ #[derive(Debug, Clone, Copy)]
+ pub struct SeparatorConfig {
+@@ -103,6 +190,7 @@
+             .flatten();
+         let workers = (0..n_workers)
+             .map(|_| SeparatorWorker {
++                evaluator_pool: Default::default(),
+                 instance: instance.clone(),
+                 prob: prob.clone(),
+                 ct: ct.clone(),
+@@ -425,10 +513,11 @@
+             .position_min()
+             .unwrap();
+ 
+-        let best_sol = self.workers[best_idx].prob.save();
+-        self.prob.restore(&best_sol);
+-        // clone() 대신 버퍼 재사용 복사 — 매 iteration마다 O(n²) 재할당을 피한다
+-        self.ct.copy_from(&self.workers[best_idx].ct);
++        // Transfer the matching problem/tracker together. Worker RNG and NFP
++        // caches remain worker-local; the next iteration reloads every worker.
++        let best = &mut self.workers[best_idx];
++        std::mem::swap(&mut self.prob, &mut best.prob);
++        std::mem::swap(&mut self.ct, &mut best.ct);
+ 
+         sep_report
+     }
+--- a/swarm-core/src/optimizer/worker.rs
++++ b/swarm-core/src/optimizer/worker.rs
+@@ -1,7 +1,7 @@
+ #[cfg(debug_assertions)]
+ use crate::FMT;
+ use crate::eval::group_sep_evaluator::GroupSeparationEvaluator;
+-use crate::eval::sep_evaluator::SeparationEvaluator;
++use crate::eval::sep_evaluator::{PooledSeparationEvaluator, SeparationEvaluatorPool};
+ use crate::optimizer::place_groups::PlaceGroups;
+ use crate::quantify::tracker::CollisionTracker;
+ use crate::sample::search;
+@@ -21,6 +21,7 @@
+ use tap::Tap;
+ 
+ pub struct SeparatorWorker {
++    pub(crate) evaluator_pool: SeparationEvaluatorPool,
+     pub instance: SPInstance,
+     pub prob: SPProblem,
+     pub ct: CollisionTracker,
+@@ -143,6 +144,7 @@
+                 let instance = &self.instance;
+                 let place_groups = &self.place_groups;
+                 let sample_config = self.sample_config;
++                let evaluator_pool = &self.evaluator_pool;
+                 let (best_sample, n_evals) = if place_groups.group_id_of(item_id).is_some() {
+                     search_placement_maybe_nfp(
+                         layout,
+@@ -168,13 +170,14 @@
+                         &mut self.nfp,
+                         item,
+                         Some(pk),
+-                        || SeparationEvaluator::new(layout, item, pk, ct),
++                        || PooledSeparationEvaluator::new(layout, item, pk, ct, evaluator_pool),
+                         sample_config,
+                         &mut self.rng,
+                         term,
+                     )
+                 };
+ 
++                total_evals += n_evals;
+                 if term.kill() {
+                     break;
+                 }
+@@ -184,7 +187,6 @@
+ 
+                 self.move_item(pk, new_dt);
+                 total_moves += 1;
+-                total_evals += n_evals;
+             }
+         }
+         SepStats {
+@@ -222,16 +224,18 @@
+             let layout = &self.prob.layout;
+             let ct = &self.ct;
+             let sample_config = self.sample_config;
++            let evaluator_pool = &self.evaluator_pool;
+             let (best_sample, n_evals) = search_placement_maybe_nfp(
+                 layout,
+                 &mut self.nfp,
+                 item,
+                 Some(pk),
+-                || SeparationEvaluator::new(layout, item, pk, ct),
++                || PooledSeparationEvaluator::new(layout, item, pk, ct, evaluator_pool),
+                 sample_config,
+                 &mut self.rng,
+                 term,
+             );
++            total_evals += n_evals;
+             if term.kill() {
+                 break;
+             }
+@@ -240,7 +244,6 @@
+             };
+             self.move_item(pk, new_dt);
+             total_moves += 1;
+-            total_evals += n_evals;
+         }
+         SepStats {
+             total_moves,
+--- a/swarm-core/src/quantify/simd/mod.rs
++++ b/swarm-core/src/quantify/simd/mod.rs
+@@ -2,7 +2,7 @@
+ use crate::quantify::calc_shape_penalty;
+ use crate::quantify::simd::circles_soa::CirclesSoA;
+ use crate::quantify::simd::overlap_proxy_simd::{
+-    poles_overlap_area_proxy_simd, poles_overlap_area_proxy_simd_bounded,
++    poles_overlap_area_proxy_simd, poles_overlap_area_proxy_simd_until,
+ };
+ use jagua_rs::geometry::primitives::SPolygon;
+ use std::f32::consts::PI;
+@@ -33,9 +33,8 @@
+ /// 상한을 폴 루프 안까지 밀어 넣는 것이 요점이다. 지금 분리기는 쌍 하나를 끝까지
+ /// 정량화한 뒤 바깥에서 버리는데, 초과가 확정된 시점 이후의 폴 순회가 통째로 낭비다.
+ ///
+-/// 상한은 최종 손실 기준이므로 커널이 쓰는 "PI 곱하기 전 누적 겹침" 으로 역산해
+-/// 넘긴다. 역산 결과가 음수면 어떤 겹침으로도 상한 아래가 될 수 없다는 뜻이라
+-/// 계산을 시작하지도 않는다.
++/// 역산 상한은 빠른 비교용 힌트다. 실제 탈락은 원래 정방향 f32 계산으로
++/// 확인하므로 상한과 같은 후보를 반올림 오차 때문에 버리지 않는다.
+ #[inline(always)]
+ pub fn quantify_collision_poly_poly_simd_bounded(
+     s1: &SPolygon,
+@@ -43,30 +42,44 @@
+     poles2: &CirclesSoA,
+     max_loss: f32,
+ ) -> Option<f32> {
++    quantify_collision_poly_poly_simd_bounded_by(s1, s2, poles2, max_loss, |loss| loss > max_loss)
++}
++
++/// `max_loss_hint` only gates the more expensive forward comparison. It never
++/// decides rejection: inverse f32 arithmetic can round across an exact bound.
++/// `rejects` must be monotone for nonnegative loss (including weighted sums).
++#[inline(always)]
++pub(crate) fn quantify_collision_poly_poly_simd_bounded_by(
++    s1: &SPolygon,
++    s2: &SPolygon,
++    poles2: &CirclesSoA,
++    max_loss_hint: f32,
++    rejects: impl Fn(f32) -> bool,
++) -> Option<f32> {
+     let epsilon = f32::max(s1.diameter, s2.diameter) * OVERLAP_PROXY_EPSILON_DIAM_RATIO;
+     let epsilon_sq = epsilon * epsilon;
+     let penalty = calc_shape_penalty(s1, s2);
+ 
+     // loss = sqrt(overlap * PI + eps^2) * penalty 를 overlap 에 대해 뒤집는다.
+     let max_unscaled_overlap = {
+-        let max_sqrt_proxy = max_loss / penalty;
++        let max_sqrt_proxy = max_loss_hint / penalty;
+         let overlap = (max_sqrt_proxy * max_sqrt_proxy - epsilon_sq) / PI;
+-        if overlap < 0.0 {
+-            return None;
+-        }
+-        overlap
++        overlap.max(0.0)
+     };
+ 
+     // 커널이 돌려주는 값에는 PI 가 이미 곱해져 있다(상한 비교만 곱하기 전 기준이다).
+-    let overlap_proxy = poles_overlap_area_proxy_simd_bounded(
++    let overlap_proxy = poles_overlap_area_proxy_simd_until(
+         s1.surrogate(),
+         s2.surrogate(),
+         epsilon,
+         poles2,
+-        max_unscaled_overlap,
++        |partial| {
++            partial >= max_unscaled_overlap && rejects((partial * PI + epsilon_sq).sqrt() * penalty)
++        },
+     )? + epsilon_sq;
+ 
+-    Some(overlap_proxy.sqrt() * penalty)
++    let loss = overlap_proxy.sqrt() * penalty;
++    (!rejects(loss)).then_some(loss)
+ }
+ 
+ #[cfg(test)]
+@@ -106,7 +119,10 @@
+         let poles_b = soa(&b);
+ 
+         let exact = quantify_collision_poly_poly_simd(&a, &b, &poles_b);
+-        assert!(exact > 0.0, "겹친 두 사각형의 손실은 양수여야 한다: {exact}");
++        assert!(
++            exact > 0.0,
++            "겹친 두 사각형의 손실은 양수여야 한다: {exact}"
++        );
+ 
+         let bounded = quantify_collision_poly_poly_simd_bounded(&a, &b, &poles_b, exact * 2.0);
+         let got = bounded.expect("상한이 결과의 2배면 끝까지 계산되어야 한다");
+@@ -131,8 +147,7 @@
+     }
+ 
+     #[test]
+-    fn 상한이_0이면_계산조차_시작하지_않는다() {
+-        // max_loss 0 이면 epsilon^2 때문에 역산이 음수가 되어 즉시 None 이다.
++    fn 상한이_0이면_양의_손실을_거절한다() {
+         let a = rect(0.0, 0.0, 100.0, 60.0);
+         let b = rect(50.0, 20.0, 100.0, 60.0);
+         assert_eq!(
+@@ -152,4 +167,49 @@
+             .expect("떨어진 조각은 상한에 걸릴 이유가 없다");
+         assert!((got - exact).abs() <= exact.max(1.0) * 1e-4);
+     }
+-}
++
++    #[test]
++    fn bounded_preserves_exact_and_adjacent_float_bounds() {
++        let a = rect(0.0, 0.0, 100.0, 60.0);
++        for x in [-110.0, -30.3, 0.0, 0.125, 49.7, 99.99, 120.0] {
++            let b = rect(x, 7.3, 100.0, 60.0);
++            let poles = soa(&b);
++            let exact = quantify_collision_poly_poly_simd(&a, &b, &poles);
++            for bound in [
++                0.0,
++                exact.next_down(),
++                exact,
++                exact.next_up(),
++                f32::INFINITY,
++            ] {
++                let result = quantify_collision_poly_poly_simd_bounded(&a, &b, &poles, bound);
++                assert_eq!(
++                    result.is_none(),
++                    exact > bound,
++                    "x={x}, loss={exact}, bound={bound}"
++                );
++                if let Some(loss) = result {
++                    assert_eq!(loss.to_bits(), exact.to_bits());
++                }
++            }
++            for weight in [0.001, 0.7, 1.0, 123.45, 100000.0] {
++                for (cached, extra) in [(0.0, 0.0), (31.27, 0.03), (1e12, 1e5)] {
++                    let total: f32 = cached + (extra + exact * weight);
++                    for bound in [total.next_down(), total, total.next_up()] {
++                        let result = quantify_collision_poly_poly_simd_bounded_by(
++                            &a,
++                            &b,
++                            &poles,
++                            (bound - cached - extra) / weight,
++                            |loss| cached + (extra + loss * weight) > bound,
++                        );
++                        assert_eq!(result.is_none(), total > bound);
++                        if let Some(loss) = result {
++                            assert_eq!(loss.to_bits(), exact.to_bits());
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
+--- a/swarm-core/src/quantify/simd/overlap_proxy_simd.rs
++++ b/swarm-core/src/quantify/simd/overlap_proxy_simd.rs
+@@ -47,16 +47,31 @@
+     p2: &CirclesSoA,
+     max_unscaled_overlap: f32,
+ ) -> Option<f32> {
++    poles_overlap_area_proxy_simd_until(sp1, sp2, epsilon, p2, |overlap| {
++        overlap > max_unscaled_overlap
++    })
++}
++
++/// The predicate sees a monotone partial sum, before multiplication by PI.
++/// Callers can verify a cutoff with the same forward arithmetic as their loss.
++#[inline]
++pub fn poles_overlap_area_proxy_simd_until(
++    sp1: &SPSurrogate,
++    sp2: &SPSurrogate,
++    epsilon: f32,
++    p2: &CirclesSoA,
++    should_stop: impl Fn(f32) -> bool,
++) -> Option<f32> {
+     #[cfg(target_arch = "x86_64")]
+     {
+         if std::arch::is_x86_feature_detected!("avx512f") {
+-            return unsafe { kernel_16(sp1, sp2, epsilon, p2, max_unscaled_overlap) };
++            return unsafe { kernel_16(sp1, sp2, epsilon, p2, should_stop) };
+         }
+         if std::arch::is_x86_feature_detected!("avx2") {
+-            return unsafe { kernel_8(sp1, sp2, epsilon, p2, max_unscaled_overlap) };
++            return unsafe { kernel_8(sp1, sp2, epsilon, p2, should_stop) };
+         }
+     }
+-    kernel_4(sp1, sp2, epsilon, p2, max_unscaled_overlap)
++    kernel_4(sp1, sp2, epsilon, p2, should_stop)
+ }
+ 
+ // endregion
+@@ -69,7 +84,7 @@
+     sp2: &SPSurrogate,
+     epsilon: f32,
+     p2: &CirclesSoA,
+-    max_unscaled_overlap: f32,
++    should_stop: impl Fn(f32) -> bool,
+ ) -> Option<f32> {
+     use std::simd::StdFloat;
+     use std::simd::prelude::{SimdFloat, SimdPartialOrd};
+@@ -127,7 +142,7 @@
+         // sp1 폴 하나를 끝낼 때마다 한 번만 본다. 청크마다 검사하면 분기 비용이
+         // SIMD 이득을 깎는다. 누적값은 단조 증가(모든 항이 음이 아니다)라
+         // 한 번 넘으면 다시 내려올 수 없다 — 조기 탈출이 안전하다.
+-        if total_overlap > max_unscaled_overlap {
++        if should_stop(total_overlap) {
+             return None;
+         }
+     }
+@@ -137,14 +152,12 @@
+     // 순차 구현과의 동치 검사는 **끝까지 돈 경우에만** 성립한다.
+     // 조기 탈출 경로는 애초에 값을 돌려주지 않으므로 비교 대상이 아니다.
+     debug_assert!(
+-        !max_unscaled_overlap.is_finite()
+-            && approx_eq!(
+-                f32,
+-                total_overlap,
+-                overlap_area_proxy(sp1, sp2, epsilon),
+-                epsilon = total_overlap * 1e-3
+-            )
+-            || max_unscaled_overlap.is_finite(),
++        approx_eq!(
++            f32,
++            total_overlap,
++            overlap_area_proxy(sp1, sp2, epsilon),
++            epsilon = total_overlap * 1e-3
++        ),
+         "SIMD and SEQ results do not match: {} vs {}",
+         total_overlap,
+         overlap_area_proxy(sp1, sp2, epsilon)
+@@ -162,9 +175,9 @@
+     sp2: &SPSurrogate,
+     epsilon: f32,
+     p2: &CirclesSoA,
+-    max_unscaled_overlap: f32,
+-) -> Option<f32> {
+-    simd_kernel::<4>(sp1, sp2, epsilon, p2, max_unscaled_overlap)
++    should_stop: impl Fn(f32) -> bool,
++) -> Option<f32> {
++    simd_kernel::<4>(sp1, sp2, epsilon, p2, should_stop)
+ }
+ 
+ #[target_feature(enable = "avx2")]
+@@ -173,9 +186,9 @@
+     sp2: &SPSurrogate,
+     epsilon: f32,
+     p2: &CirclesSoA,
+-    max_unscaled_overlap: f32,
+-) -> Option<f32> {
+-    simd_kernel::<8>(sp1, sp2, epsilon, p2, max_unscaled_overlap)
++    should_stop: impl Fn(f32) -> bool,
++) -> Option<f32> {
++    simd_kernel::<8>(sp1, sp2, epsilon, p2, should_stop)
+ }
+ 
+ #[target_feature(enable = "avx512f")]
+@@ -184,9 +197,9 @@
+     sp2: &SPSurrogate,
+     epsilon: f32,
+     p2: &CirclesSoA,
+-    max_unscaled_overlap: f32,
+-) -> Option<f32> {
+-    simd_kernel::<16>(sp1, sp2, epsilon, p2, max_unscaled_overlap)
++    should_stop: impl Fn(f32) -> bool,
++) -> Option<f32> {
++    simd_kernel::<16>(sp1, sp2, epsilon, p2, should_stop)
+ }
+ 
+ // endregion
+--- a/swarm-core/src/quantify/tracker.rs
++++ b/swarm-core/src/quantify/tracker.rs
+@@ -9,20 +9,85 @@
+ use jagua_rs::entities::{Layout, PItemKey};
+ use ordered_float::Float;
+ use slotmap::SecondaryMap;
++use std::sync::OnceLock;
++
++/// Lazy exact sums: each invalidated value is recomputed in the original order,
++/// avoiding the rounding drift of incremental subtraction/addition.
++#[derive(Debug, Clone, Default)]
++struct LossCache {
++    rows: Vec<OnceLock<f32>>,
++    weighted_rows: Vec<OnceLock<f32>>,
++    total: OnceLock<f32>,
++    weighted_total: OnceLock<f32>,
++}
++
++impl LossCache {
++    fn new(size: usize) -> Self {
++        Self {
++            rows: vec![OnceLock::new(); size],
++            weighted_rows: vec![OnceLock::new(); size],
++            ..Self::default()
++        }
++    }
++    fn clear(&mut self) {
++        for row in &mut self.rows {
++            row.take();
++        }
++        self.clear_weights();
++        self.total.take();
++    }
++    fn copy_from(&mut self, source: &Self) {
++        self.rows.clone_from(&source.rows);
++        self.weighted_rows.clone_from(&source.weighted_rows);
++        self.total.clone_from(&source.total);
++        self.weighted_total.clone_from(&source.weighted_total);
++    }
++    fn clear_weights(&mut self) {
++        for row in &mut self.weighted_rows {
++            row.take();
++        }
++        self.weighted_total.take();
++    }
++    fn invalidate_pair(&mut self, a: usize, b: usize) {
++        self.rows[a].take();
++        self.rows[b].take();
++        self.weighted_rows[a].take();
++        self.weighted_rows[b].take();
++        self.total.take();
++        self.weighted_total.take();
++    }
++}
+ 
+ /// Tracker of both collisions between pair of items and collisions with the container.
+ /// It also stores the weights for every pair of hazards and is used as a cache for collisions.
+-#[derive(Debug, Clone)]
++#[derive(Debug)]
+ pub struct CollisionTracker {
+     pub size: usize,
+     pub pk_idx_map: SecondaryMap<PItemKey, usize>,
+-    pub pair_collisions: PairMatrix,
+-    pub container_collisions: Vec<CTEntry>,
++    pair_collisions: PairMatrix,
++    container_collisions: Vec<CTEntry>,
++    cache: LossCache,
++    collector: BasicHazardCollector,
+     /// idx별 고정 여부. 고정-고정 쌍 및 고정-컨테이너 충돌은 어떤 이동으로도
+     /// 해소할 수 없는 상수이므로 loss 집계에서 제외한다.
+     pub frozen: Vec<bool>,
+ }
+ 
++impl Clone for CollisionTracker {
++    fn clone(&self) -> Self {
++        Self {
++            size: self.size,
++            pk_idx_map: self.pk_idx_map.clone(),
++            pair_collisions: self.pair_collisions.clone(),
++            container_collisions: self.container_collisions.clone(),
++            frozen: self.frozen.clone(),
++            cache: self.cache.clone(),
++            // Scratch has no semantic state and need not be copied into snapshots.
++            collector: BasicHazardCollector::new(),
++        }
++    }
++}
++
+ pub type CTSnapshot = CollisionTracker;
+ 
+ impl CollisionTracker {
+@@ -36,6 +101,8 @@
+ 
+         // Create the tracker
+         let mut ot = Self {
++            cache: LossCache::new(size),
++            collector: BasicHazardCollector::with_capacity(size + 1),
+             size,
+             pk_idx_map: l
+                 .placed_items
+@@ -75,13 +142,18 @@
+ 
+         // Reset all current loss values for the item
+         for i in 0..self.size {
++            if self.pair_collisions[(idx, i)].loss != 0.0 {
++                self.cache.invalidate_pair(idx, i);
++            }
+             self.pair_collisions[(idx, i)].loss = 0.0;
+         }
++        self.cache.invalidate_pair(idx, idx);
+         self.container_collisions[idx].loss = 0.0;
+ 
+         // Compute which hazards are currently colliding with the item
+-        let mut collector = BasicHazardCollector::with_capacity(l.placed_items.len() + 1);
+-        l.cde().collect_poly_collisions(shape, &mut collector);
++        let collector = &mut self.collector;
++        collector.clear();
++        l.cde().collect_poly_collisions(shape, collector);
+         // Remove the item itself from the detector
+         collector.remove_by_entity(&HazardEntity::from((pk, pi)));
+ 
+@@ -100,6 +172,7 @@
+                     let loss = quantify_collision_poly_poly(shape, shape_other);
+                     assert!(loss > 0.0, "loss for a collision should be > 0.0");
+                     self.pair_collisions[(idx, idx_other)].loss = loss;
++                    self.cache.invalidate_pair(idx, idx_other);
+                 }
+                 HazardEntity::Exterior => {
+                     // 고정 아이템과 컨테이너 경계의 충돌은 해소 불가능한 상수 → loss에서 제외
+@@ -120,6 +193,7 @@
+     /// 매 iteration 호출되는 핫패스에서 `clone()`이 유발하는 O(n²) 크기의
+     /// 재할당(pair matrix)을 피하기 위한 것. 사이즈가 같으면 순수 memcpy다.
+     pub fn copy_from(&mut self, src: &Self) {
++        self.cache.copy_from(&src.cache);
+         self.size = src.size;
+         self.pk_idx_map.clone_from(&src.pk_idx_map);
+         self.pair_collisions.size = src.pair_collisions.size;
+@@ -135,6 +209,7 @@
+     }
+ 
+     pub fn restore_but_keep_weights(&mut self, cts: &CTSnapshot, layout: &Layout) {
++        self.cache.clear();
+         //Copy the loss and keys, but keep the weights
+         self.pk_idx_map.clone_from(&cts.pk_idx_map);
+         self.frozen.clone_from(&cts.frozen);
+@@ -160,6 +235,7 @@
+     /// 컨테이너 가중치와, 그런 아이템끼리의 쌍 가중치만 복사한다. 제거 후 재삽입되어
+     /// 키가 바뀐 아이템은 위치 자체가 달라졌으므로 기본 가중치 1.0에서 다시 시작한다.
+     pub fn inherit_weights_from(&mut self, old: &Self) {
++        self.cache.clear_weights();
+         // (pk, 새 idx, 옛 idx) — 양쪽에 다 있는 아이템만
+         let survivors: Vec<(usize, usize)> = self
+             .pk_idx_map
+@@ -190,6 +266,7 @@
+ 
+     /// Algorithm 8 from https://doi.org/10.48550/arXiv.2509.13329
+     pub fn update_weights(&mut self) {
++        self.cache.clear_weights();
+         // Find the maximum usable loss across all entries. Invalid geometry
+         // must not turn the GLS multiplier and learned weight into NaN.
+         let max_loss = self
+@@ -248,56 +325,79 @@
+ 
+     pub fn get_loss(&self, pk: PItemKey) -> f32 {
+         let idx = self.pk_idx_map[pk];
+-
+-        let pair_loss = (0..self.size)
+-            .map(|i| self.pair_collisions[(idx, i)].loss)
+-            .sum::<f32>();
+-
+-        self.container_collisions[idx].loss + pair_loss
++        *self.cache.rows[idx].get_or_init(|| {
++            let pair_loss = (0..self.size)
++                .map(|i| self.pair_collisions[(idx, i)].loss)
++                .sum::<f32>();
++
++            self.container_collisions[idx].loss + pair_loss
++        })
+     }
+ 
+     pub fn get_weighted_loss(&self, pk: PItemKey) -> f32 {
+         let idx = self.pk_idx_map[pk];
+-
+-        let w_pair_loss = (0..self.size)
+-            .map(|i| self.pair_collisions[(idx, i)].weighted_loss())
+-            .sum::<f32>();
+-
+-        self.container_collisions[idx].weighted_loss() + w_pair_loss
++        *self.cache.weighted_rows[idx].get_or_init(|| {
++            let w_pair_loss = (0..self.size)
++                .map(|i| self.pair_collisions[(idx, i)].weighted_loss())
++                .sum::<f32>();
++
++            self.container_collisions[idx].weighted_loss() + w_pair_loss
++        })
+     }
+ 
+     pub fn get_total_loss(&self) -> f32 {
+-        let cont_o = self
+-            .container_collisions
+-            .iter()
+-            .map(|e| e.loss)
+-            .sum::<f32>();
+-
+-        let pair_o = self
+-            .pair_collisions
+-            .data
+-            .iter()
+-            .map(|e| e.loss)
+-            .sum::<f32>();
+-
+-        cont_o + pair_o
++        *self.cache.total.get_or_init(|| {
++            let cont_o = self
++                .container_collisions
++                .iter()
++                .map(|e| e.loss)
++                .sum::<f32>();
++
++            let pair_o = self
++                .pair_collisions
++                .data
++                .iter()
++                .map(|e| e.loss)
++                .sum::<f32>();
++
++            cont_o + pair_o
++        })
+     }
+ 
+     pub fn get_total_weighted_loss(&self) -> f32 {
+-        let cont_w_o = self
+-            .container_collisions
+-            .iter()
+-            .map(|e| e.weighted_loss())
+-            .sum::<f32>();
+-
+-        let pair_w_o = self
+-            .pair_collisions
+-            .data
+-            .iter()
+-            .map(|e| e.weighted_loss())
+-            .sum::<f32>();
+-
+-        cont_w_o + pair_w_o
++        *self.cache.weighted_total.get_or_init(|| {
++            let cont_w_o = self
++                .container_collisions
++                .iter()
++                .map(|e| e.weighted_loss())
++                .sum::<f32>();
++
++            let pair_w_o = self
++                .pair_collisions
++                .data
++                .iter()
++                .map(|e| e.weighted_loss())
++                .sum::<f32>();
++
++            cont_w_o + pair_w_o
++        })
++    }
++
++    pub fn pair_collisions(&self) -> &PairMatrix {
++        &self.pair_collisions
++    }
++    pub fn container_collisions(&self) -> &[CTEntry] {
++        &self.container_collisions
++    }
++
++    /// Exclusive mutation invalidates every dependent sum before exposing data.
++    pub fn pair_collisions_mut(&mut self) -> &mut PairMatrix {
++        self.cache.clear();
++        &mut self.pair_collisions
++    }
++    pub fn container_collisions_mut(&mut self) -> &mut [CTEntry] {
++        self.cache.clear();
++        &mut self.container_collisions
+     }
+ }
+ 
+@@ -349,6 +449,8 @@
+ 
+     fn tracker_with_one_collision(loss: f32) -> CollisionTracker {
+         CollisionTracker {
++            cache: LossCache::new(1),
++            collector: BasicHazardCollector::new(),
+             size: 1,
+             pk_idx_map: SecondaryMap::new(),
+             pair_collisions: PairMatrix::new(1),
+--- a/swarm-core/tests/lns_smoke.rs
++++ b/swarm-core/tests/lns_smoke.rs
+@@ -69,10 +69,10 @@
+     let mut sep = build_colliding_separator(42);
+     // GLS can assign very different importance to collision pairs. Exercise
+     // swap acceptance under deliberately heterogeneous learned weights.
+-    for (idx, entry) in sep.ct.pair_collisions.data.iter_mut().enumerate() {
++    for (idx, entry) in sep.ct.pair_collisions_mut().data.iter_mut().enumerate() {
+         entry.weight = if idx % 3 == 0 { 100.0 } else { 1.0 };
+     }
+-    for (idx, entry) in sep.ct.container_collisions.iter_mut().enumerate() {
++    for (idx, entry) in sep.ct.container_collisions_mut().iter_mut().enumerate() {
+         entry.weight = if idx % 2 == 0 { 75.0 } else { 1.0 };
+     }
+     let n_items_before = sep.prob.layout.placed_items.len();
+@@ -215,10 +215,10 @@
+     }
+ 
+     let mut sep = build_colliding_separator(707);
+-    for (idx, entry) in sep.ct.pair_collisions.data.iter_mut().enumerate() {
++    for (idx, entry) in sep.ct.pair_collisions_mut().data.iter_mut().enumerate() {
+         entry.weight = 1.0 + (idx % 11) as f32;
+     }
+-    for (idx, entry) in sep.ct.container_collisions.iter_mut().enumerate() {
++    for (idx, entry) in sep.ct.container_collisions_mut().iter_mut().enumerate() {
+         entry.weight = 1.0 + (idx % 7) as f32;
+     }
+     let before_solution = sep.prob.save();
+@@ -263,24 +263,24 @@
+     }
+     assert_eq!(sep.prob.strip_width(), before_solution.strip_width());
+     assert_eq!(
+-        sep.ct.pair_collisions.data.len(),
+-        before_tracker.pair_collisions.data.len()
++        sep.ct.pair_collisions().data.len(),
++        before_tracker.pair_collisions().data.len()
+     );
+     for (after, before) in sep
+         .ct
+-        .pair_collisions
++        .pair_collisions()
+         .data
+         .iter()
+-        .zip(&before_tracker.pair_collisions.data)
++        .zip(&before_tracker.pair_collisions().data)
+     {
+         assert_eq!(after.loss.to_bits(), before.loss.to_bits());
+         assert_eq!(after.weight.to_bits(), before.weight.to_bits());
+     }
+     for (after, before) in sep
+         .ct
+-        .container_collisions
++        .container_collisions()
+         .iter()
+-        .zip(&before_tracker.container_collisions)
++        .zip(before_tracker.container_collisions())
+     {
+         assert_eq!(after.loss.to_bits(), before.loss.to_bits());
+         assert_eq!(after.weight.to_bits(), before.weight.to_bits());
+--- a/src/grouped_engine.rs
++++ b/src/grouped_engine.rs
+@@ -3344,7 +3344,7 @@
+             .find_map(|(pk, item)| (item.item_id == survivor_item_id).then_some(pk))
+             .unwrap();
+         let first_idx = first.ct.pk_idx_map[first_pk];
+-        first.ct.container_collisions[first_idx].weight = 3.25;
++        first.ct.container_collisions_mut()[first_idx].weight = 3.25;
+         lane.remember_tracker(LanePhase::Exploration, &first.ct);
+ 
+         // Re-entering the same phase builds exact losses afresh and copies the
+--- /dev/null
++++ b/swarm-core/tests/explore_code_optimization.rs
+@@ -0,0 +1,242 @@
++use jagua_rs::entities::Instance;
++use jagua_rs::geometry::DTransformation;
++use jagua_rs::io::import::Importer;
++use jagua_rs::probs::spp::entities::{SPInstance, SPPlacement, SPProblem};
++use jagua_rs::probs::spp::io::ext_repr::ExtSPInstance;
++use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
++use swarm_core::config::DEFAULT_SWARM_CONFIG;
++use swarm_core::eval::sample_eval::{SampleEval, SampleEvaluator};
++use swarm_core::eval::sep_evaluator::{
++    PooledSeparationEvaluator, SeparationEvaluator, SeparationEvaluatorPool,
++};
++use swarm_core::optimizer::separator::Separator;
++use swarm_core::quantify::tracker::CollisionTracker;
++use swarm_core::util::assertions::tracker_matches_layout;
++
++fn fixture() -> (SPInstance, SPProblem) {
++    let ext: ExtSPInstance = serde_json::from_value(serde_json::json!({
++        "name":"explore-code-regression", "strip_height":30.0,
++        "items":[
++            {"id":0,"demand":1,"allowed_orientations":[0.0],"shape":{"type":"rectangle","data":{"x_min":0.0,"y_min":0.0,"width":8.0,"height":8.0}}},
++            {"id":1,"demand":1,"allowed_orientations":[0.0],"shape":{"type":"rectangle","data":{"x_min":0.0,"y_min":0.0,"width":7.0,"height":5.0}}},
++            {"id":2,"demand":1,"allowed_orientations":[0.0],"shape":{"type":"rectangle","data":{"x_min":0.0,"y_min":0.0,"width":4.0,"height":3.0}}}
++        ]})).unwrap();
++    let cfg = DEFAULT_SWARM_CONFIG;
++    let importer = Importer::new(
++        cfg.cde_config,
++        cfg.poly_simpl_tolerance,
++        cfg.min_item_separation,
++        cfg.narrow_concavity_cutoff_ratio,
++    );
++    let instance = jagua_rs::probs::spp::io::import_instance(&importer, &ext).unwrap();
++    let mut prob = SPProblem::new(instance.clone());
++    prob.change_strip_width(40.0);
++    for id in 0..3 {
++        prob.place_item(SPPlacement {
++            item_id: id,
++            d_transf: DTransformation::new(0.0, (10.0 + id as f32 * 2.0, 10.0)),
++        });
++    }
++    (instance, prob)
++}
++
++fn assert_sums(ct: &CollisionTracker) {
++    let raw = ct
++        .container_collisions()
++        .iter()
++        .map(|e| e.loss)
++        .sum::<f32>()
++        + ct.pair_collisions()
++            .data
++            .iter()
++            .map(|e| e.loss)
++            .sum::<f32>();
++    let weighted = ct
++        .container_collisions()
++        .iter()
++        .map(|e| e.weighted_loss())
++        .sum::<f32>()
++        + ct.pair_collisions()
++            .data
++            .iter()
++            .map(|e| e.weighted_loss())
++            .sum::<f32>();
++    for _ in 0..2 {
++        assert_eq!(ct.get_total_loss().to_bits(), raw.to_bits());
++        assert_eq!(ct.get_total_weighted_loss().to_bits(), weighted.to_bits());
++        for (pk, &idx) in &ct.pk_idx_map {
++            let row = ct.container_collisions()[idx].loss
++                + (0..ct.size)
++                    .map(|i| ct.pair_collisions()[(idx, i)].loss)
++                    .sum::<f32>();
++            let wrow = ct.container_collisions()[idx].weighted_loss()
++                + (0..ct.size)
++                    .map(|i| ct.pair_collisions()[(idx, i)].weighted_loss())
++                    .sum::<f32>();
++            assert_eq!(ct.get_loss(pk).to_bits(), row.to_bits());
++            assert_eq!(ct.get_weighted_loss(pk).to_bits(), wrow.to_bits());
++        }
++    }
++}
++
++#[test]
++fn exact_sum_cache_survives_moves_weight_updates_copy_and_rollback() {
++    let (instance, prob) = fixture();
++    let mut sep = Separator::new(
++        instance,
++        prob,
++        Xoshiro256PlusPlus::seed_from_u64(17),
++        DEFAULT_SWARM_CONFIG.expl_cfg.separator_config,
++    );
++    let original = sep.prob.save();
++    let snapshot = sep.ct.save();
++    assert_sums(&sep.ct);
++    for i in 0..8 {
++        let pk = sep.prob.layout.placed_items.keys().next().unwrap();
++        sep.move_item(pk, DTransformation::new(0.0, (5.0 + i as f32 * 2.0, 10.0)));
++        assert_sums(&sep.ct);
++        sep.ct.update_weights();
++        assert_sums(&sep.ct);
++        let mut copied = snapshot.clone();
++        copied.copy_from(&sep.ct);
++        assert_sums(&copied);
++    }
++    sep.ct.pair_collisions_mut()[(0, 1)].weight = 7.3;
++    assert_sums(&sep.ct);
++    sep.ct.container_collisions_mut()[0].weight = 2.5;
++    assert_sums(&sep.ct);
++    sep.rollback(&original, Some(&snapshot));
++    assert_sums(&sep.ct);
++    assert!(tracker_matches_layout(&sep.ct, &sep.prob.layout));
++    sep.freeze_items(&[0, 1]);
++    assert_sums(&sep.ct);
++    sep.ct.inherit_weights_from(&snapshot);
++    assert_sums(&sep.ct);
++    sep.rollback(&original, None);
++    assert_sums(&sep.ct);
++}
++
++fn signature(eval: SampleEval) -> (u8, u32) {
++    match eval {
++        SampleEval::Invalid => (0, 0),
++        SampleEval::Clear { loss } => (1, loss.to_bits()),
++        SampleEval::Collision { loss } => (2, loss.to_bits()),
++    }
++}
++
++#[test]
++fn pooled_evaluator_matches_fresh_across_items_and_layout_changes() {
++    let (instance, mut prob) = fixture();
++    let pool = SeparationEvaluatorPool::default();
++    for round in 0..3 {
++        let ct = CollisionTracker::new(&prob.layout);
++        for (pk, pi) in &prob.layout.placed_items {
++            let item = instance.item(pi.item_id);
++            let mut fresh = SeparationEvaluator::new(&prob.layout, item, pk, &ct);
++            let mut pooled = PooledSeparationEvaluator::new(&prob.layout, item, pk, &ct, &pool);
++            for x in 0..40 {
++                let dt = DTransformation::new(0.0, (x as f32 + 0.125, 10.0));
++                let full = fresh.evaluate_sample(dt, None);
++                assert_eq!(signature(full), signature(pooled.evaluate_sample(dt, None)));
++                for bound in [0.0, 0.125, 10.0, 100.0, f32::INFINITY] {
++                    let upper = Some(SampleEval::Collision { loss: bound });
++                    assert_eq!(
++                        signature(fresh.evaluate_sample(dt, upper)),
++                        signature(pooled.evaluate_sample(dt, upper))
++                    );
++                }
++            }
++        }
++        let pk = prob.layout.placed_items.keys().next().unwrap();
++        let mut placement = prob.remove_item(pk);
++        placement.d_transf = DTransformation::new(0.0, (22.0 + round as f32, 20.0));
++        prob.place_item(placement);
++    }
++}
++
++#[test]
++fn pending_hazards_preserve_map_order_and_removal_contract() {
++    use jagua_rs::collision_detection::hazards::{HazardEntity, collector::HazardCollector};
++    use swarm_core::eval::specialized_jaguars_pipeline::SpecializedHazardCollector;
++    let (_, prob) = fixture();
++    let ct = CollisionTracker::new(&prob.layout);
++    let pk = prob.layout.placed_items.keys().next().unwrap();
++    let shape = &prob.layout.placed_items[pk].shape;
++    let mut collector = SpecializedHazardCollector::new(&prob.layout, &ct, pk);
++    #[cfg(feature = "simd")]
++    collector.poles_soa.load(&shape.surrogate().poles);
++    let mut hazards: Vec<_> = prob
++        .layout
++        .cde()
++        .hazards_map
++        .iter()
++        .filter(|(key, _)| *key != collector.current_haz_key)
++        .map(|(key, haz)| (key, haz.entity))
++        .collect();
++    hazards.reverse();
++    let reference = |collector: &SpecializedHazardCollector| -> f32 {
++        collector
++            .detected
++            .values()
++            .map(|(haz, _)| match haz {
++                HazardEntity::PlacedItem { pk: other, .. } => {
++                    let other_shape = &prob.layout.placed_items[*other].shape;
++                    #[cfg(feature = "simd")]
++                    let loss = swarm_core::quantify::simd::quantify_collision_poly_poly_simd(
++                        other_shape,
++                        shape,
++                        &collector.poles_soa,
++                    );
++                    #[cfg(not(feature = "simd"))]
++                    let loss =
++                        swarm_core::quantify::quantify_collision_poly_poly(other_shape, shape);
++                    loss * ct.get_pair_weight(pk, *other)
++                }
++                HazardEntity::Exterior => {
++                    swarm_core::quantify::quantify_collision_poly_container(
++                        shape,
++                        prob.layout.container.outer_cd.bbox,
++                    ) * ct.get_container_weight(pk)
++                }
++                _ => unreachable!(),
++            })
++            .sum()
++    };
++    // Reverse insertion order must still use the original slot order for sums.
++    for &(key, hazard) in &hazards {
++        collector.insert(key, hazard);
++    }
++    assert_eq!(
++        collector.loss(shape).to_bits(),
++        reference(&collector).to_bits()
++    );
++    let (removed, entity) = hazards[0];
++    collector.remove_by_key(removed); // removal of a previously cached entry
++    assert_eq!(
++        collector.loss(shape).to_bits(),
++        reference(&collector).to_bits()
++    );
++    collector.reload(f32::INFINITY);
++    for &(key, hazard) in &hazards {
++        collector.insert(key, hazard);
++    }
++    collector.remove_by_key(removed); // removal before the pending batch is read
++    assert_eq!(
++        collector.loss(shape).to_bits(),
++        reference(&collector).to_bits()
++    );
++    collector.insert(removed, entity);
++    assert!((collector.loss(shape) - reference(&collector)).abs() <= 0.001);
++    collector.reload(0.0);
++    for &(key, hazard) in &hazards {
++        collector.insert(key, hazard);
++    }
++    assert!(collector.early_terminate(shape));
++    // A rejected partial evaluation must not survive removal or the next query.
++    for &(key, _) in &hazards {
++        collector.remove_by_key(key);
++    }
++    assert_eq!(collector.loss(shape), 0.0);
++    collector.reload(f32::INFINITY);
++    assert_eq!(collector.loss(shape), 0.0);
++}
